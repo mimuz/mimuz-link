@@ -1,0 +1,9 @@
+{
+  "name": "midi-trigger-viewer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Web MIDI trigger viewer for the ESP-NOW latency experiment",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.21.2" }
+}

@@ -1,0 +1,203 @@
+<!doctype html>
+<!--
+
+ index Web MIDI viewer
+
+ ©2026 by D.F.Mac.@TripArts Music
+ Programmed by Claude Code
+
+ ver. history
+
+ - 2026/11/19 : Start Writing
+
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIDI Trigger Viewer</title>
+<style>
+  :root { --bg:#111; --fg:#ddd; --dim:#777; --pad:#222; --on:#36e07a; --line:#333; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system, "Hiragino Sans", sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
+  select, button, label { font:inherit; color:var(--fg); }
+  select, button { background:#222; border:1px solid #444; border-radius:6px; padding:4px 8px; }
+  #status { color:var(--dim); }
+  main { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:16px; padding:16px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  #pad { height:min(60vh, 420px); border-radius:16px; background:var(--pad); display:flex; flex-direction:column;
+         align-items:center; justify-content:center; user-select:none; }
+  #pad.on { background:var(--on); color:#000; }
+  #pad.flash { background:var(--on); color:#000; transition:none; }
+  #pad.fade { transition: background 200ms; }
+  #note { font-size:64px; font-weight:700; font-variant-numeric:tabular-nums; }
+  #sub { font-size:16px; opacity:.8; font-variant-numeric:tabular-nums; }
+  .stats { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:8px; margin-top:12px; }
+  .stat { background:#1a1a1a; border-radius:8px; padding:8px; }
+  .stat b { display:block; font-size:20px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--dim); font-size:12px; }
+  #log { height:min(70vh, 560px); overflow:auto; background:#0b0b0b; border-radius:8px; padding:8px;
+         font:12px/1.6 ui-monospace, Menlo, monospace; white-space:pre; }
+  .test { color:var(--dim); }
+  .hint { color:var(--dim); font-size:12px; padding:0 16px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>MIDI Trigger Viewer</strong>
+  <select id="input"><option>（MIDI 入力なし）</option></select>
+  <label><input type="checkbox" id="sound"> 音を鳴らす</label>
+  <label><input type="checkbox" id="showTest"> テスト用メッセージも表示</label>
+  <button id="clear">クリア</button>
+  <span id="status">起動中…</span>
+</header>
+<main>
+  <section>
+    <div id="pad"><div id="note">—</div><div id="sub">C6 のボタンを押してください</div></div>
+    <div class="stats">
+      <div class="stat"><b id="count">0</b><span>Note On 回数</span></div>
+      <div class="stat"><b id="interval">—</b><span>前回の Note On からの間隔 [ms]</span></div>
+      <div class="stat"><b id="hold">—</b><span>押していた時間 [ms]</span></div>
+      <div class="stat"><b id="deliver">—</b><span>イベント時刻→表示処理 [ms]</span></div>
+      <div class="stat"><b id="frame">—</b><span>イベント→次の描画フレーム [ms]</span></div>
+      <div class="stat"><b id="audioLat">—</b><span>音の出力遅延（推定）[ms]</span></div>
+      <div class="stat"><b id="other">0</b><span>その他のメッセージ</span></div>
+    </div>
+  </section>
+  <section><div id="log"></div></section>
+</main>
+<p class="hint">
+  Chrome / Edge で http://localhost:3000 を開く（Safari は Web MIDI 非対応）。初回は MIDI の許可を求められる。<br>
+  「イベント時刻→表示処理」は、ブラウザが MIDI を受け取った時刻（event.timeStamp）からこのページの処理が始まるまでの時間。ブラウザ内部の遅れの目安。<br>
+  音を鳴らすと、Mac のオーディオ出力の遅延（数〜十数 ms）が上乗せされる。見た目だけで判断したいときはオフにする。<br>
+  連射で押していた時間が 1 フレームより短くても見えるよう、パッドは Note On から最低 80ms 光らせている（押していた時間の表示は実測値）。
+</p>
+<script>
+const TEST = new Set([0xAF, 0xAD, 0xAE]);  // ping / burst (for latency_test.py)
+const MIN_FLASH_MS = 80;  // keep the pad lit at least this long, even if a rapid On->Off is shorter than one frame
+let offTimer = null, onAt = 0, held = false;
+const $ = id => document.getElementById(id);
+const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const noteName = n => NAMES[n % 12] + (Math.floor(n / 12) - 1);
+const hex = d => Array.from(d, b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+
+let access, current, count = 0, other = 0, lastOn = null, downAt = {};
+let t0 = null, ctx = null;
+const frames = [];
+const logLines = [];
+
+function log(text, cls) {
+  logLines.unshift(cls ? `<span class="${cls}">${text}</span>` : text);
+  if (logLines.length > 300) logLines.length = 300;
+  $('log').innerHTML = logLines.join('\n');
+}
+
+function click() {
+  if (!$('sound').checked) return;
+  if (!ctx) ctx = new AudioContext({ latencyHint: 'interactive' });
+  const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
+  o.frequency.value = 1200;
+  g.gain.setValueAtTime(0.5, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+  o.connect(g).connect(ctx.destination);
+  o.start(t); o.stop(t + 0.06);
+  const lat = ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000;
+  $('audioLat').textContent = lat ? lat.toFixed(1) : '?';
+}
+
+function onMessage(e) {
+  const now = performance.now();
+  const d = e.data, st = d[0] & 0xF0, ch = (d[0] & 0x0F) + 1;
+  const ts = e.timeStamp || now;
+  if (t0 === null) t0 = ts;
+  const isTest = TEST.has(d[0]);
+  const deliver = now - ts;
+  const tStr = ((ts - t0) / 1000).toFixed(3).padStart(10);
+
+  if (st === 0x90 && d[2] > 0) {               // Note On
+    const pad = $('pad');
+    clearTimeout(offTimer);
+    pad.classList.remove('fade', 'on');
+    void pad.offsetWidth;  // re-trigger the flash on every On, even consecutive ones
+    pad.classList.add('on');
+    onAt = performance.now(); held = true;
+    click();
+    count++;
+    const iv = lastOn === null ? null : ts - lastOn;
+    lastOn = ts;
+    downAt[d[1]] = ts;
+    $('note').textContent = noteName(d[1]);
+    $('sub').textContent = `ch${ch}  vel ${d[2]}`;
+    $('count').textContent = count;
+    $('interval').textContent = iv === null ? '—' : iv.toFixed(1);
+    $('deliver').textContent = deliver.toFixed(2);
+      requestAnimationFrame(() => {
+      const f = performance.now() - now;
+      $('frame').textContent = f.toFixed(1);
+      frames.push(f); if (frames.length > 200) frames.shift();
+      if (deliver > 5 || f > 20) log(`      ⚠ 遅い: deliver ${deliver.toFixed(2)}ms / frame ${f.toFixed(1)}ms`);
+    });
+    log(`${tStr}s  ON   ${hex(d)}  ${noteName(d[1])} vel=${d[2]}  ${iv === null ? '' : '+' + iv.toFixed(1) + 'ms'}  (deliver ${deliver.toFixed(2)}ms)`);
+  } else if (st === 0x80 || (st === 0x90 && d[2] === 0)) {   // Note Off
+    held = false;
+    const rest = Math.max(0, MIN_FLASH_MS - (performance.now() - onAt));
+    clearTimeout(offTimer);
+    offTimer = setTimeout(() => { if (!held) { const pad = $('pad'); pad.classList.add('fade'); pad.classList.remove('on'); } }, rest);
+    const h = downAt[d[1]] !== undefined ? ts - downAt[d[1]] : null;
+    delete downAt[d[1]];
+    $('hold').textContent = h === null ? '—' : h.toFixed(1);
+    log(`${tStr}s  OFF  ${hex(d)}  ${noteName(d[1])}  ${h === null ? '' : 'hold ' + h.toFixed(1) + 'ms'}`);
+  } else {
+    other++;
+    $('other').textContent = other;
+    if (!isTest || $('showTest').checked) log(`${tStr}s  ${hex(d)}`, isTest ? 'test' : '');
+  }
+}
+
+function select(id) {
+  if (current) current.onmidimessage = null;
+  current = access.inputs.get(id) || null;
+  if (current) {
+    current.onmidimessage = onMessage;
+    $('status').textContent = `受信中: ${current.name}`;
+    try { localStorage.setItem('midiInputName', current.name); } catch (_) {}
+  } else {
+    $('status').textContent = 'MIDI 入力が選ばれていません';
+  }
+}
+
+function refresh() {
+  const sel = $('input'), prevId = current && current.id;
+  let saved = null;
+  try { saved = localStorage.getItem('midiInputName'); } catch (_) {}
+  sel.innerHTML = '';
+  const inputs = [...access.inputs.values()];
+  if (!inputs.length) { sel.innerHTML = '<option value="">（MIDI 入力なし）</option>'; select(''); return; }
+  for (const i of inputs) sel.add(new Option(i.name, i.id));
+  const pick = inputs.find(i => i.id === prevId) || inputs.find(i => i.name === saved)
+            || inputs.find(i => /mi:muz|XIAO|ESP/i.test(i.name)) || inputs[0];
+  sel.value = pick.id;
+  select(pick.id);
+}
+
+$('input').onchange = e => select(e.target.value);
+$('clear').onclick = () => {
+  count = other = 0; lastOn = null; t0 = null; downAt = {}; logLines.length = 0;
+  $('log').innerHTML = ''; ['count','other'].forEach(id => $(id).textContent = '0');
+  ['interval','hold','deliver'].forEach(id => $(id).textContent = '—');
+};
+$('sound').onchange = () => { if ($('sound').checked && !ctx) ctx = new AudioContext({ latencyHint: 'interactive' }); };
+
+if (!navigator.requestMIDIAccess) {
+  $('status').textContent = 'このブラウザは Web MIDI 非対応です（Chrome / Edge を使ってください）';
+} else {
+  navigator.requestMIDIAccess({ sysex: false }).then(a => {
+    access = a;
+    access.onstatechange = refresh;
+    refresh();
+  }, err => { $('status').textContent = 'MIDI へのアクセスが拒否されました: ' + err; });
+}
+</script>
+</body>
+</html>

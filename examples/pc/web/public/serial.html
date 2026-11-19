@@ -1,0 +1,119 @@
+<!doctype html>
+<!--
+
+ serial Web Serial port-open reset test
+
+ ©2026 by D.F.Mac.@TripArts Music
+ Programmed by Claude Code
+
+ ver. history
+
+ - 2026/11/19 : Start Writing
+
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serial Open Test</title>
+<style>
+  :root { --bg:#111; --fg:#ddd; --dim:#888; --line:#333; --ok:#36e07a; --ng:#ff6b6b; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.6 -apple-system, "Hiragino Sans", sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:16px; }
+  button, select { font:inherit; color:var(--fg); background:#222; border:1px solid #444; border-radius:6px; padding:6px 12px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+  #result { font-size:18px; font-weight:700; margin:12px 0; }
+  .ok { color:var(--ok); } .ng { color:var(--ng); }
+  pre { background:#0b0b0b; border-radius:8px; padding:8px; height:50vh; overflow:auto; font:12px/1.5 ui-monospace, Menlo, monospace; white-space:pre-wrap; }
+  p { color:var(--dim); }
+  table { border-collapse:collapse; margin:8px 0; }
+  td, th { border:1px solid var(--line); padding:4px 10px; text-align:left; }
+</style>
+</head>
+<body>
+<main>
+  <h2>シリアルポートを開いたときに、C6 がリセットされるかの確認（Web Serial）</h2>
+  <p>Chrome か Edge で開く。「開いて確認」を押し、一覧から C6（USB JTAG/serial debug unit）を選ぶ。<br>
+     開いてから 2.5 秒ようすを見て、統計（s）を読み、リセットされたかどうかを判定する。開き方を変えて、何回か試す。</p>
+  <div class="row">
+    <label>開いたあとの制御線:
+      <select id="mode">
+        <option value="default">何も設定しない（ブラウザの既定）</option>
+        <option value="dtr1rts0">DTR オン / RTS オフ</option>
+        <option value="dtr0rts0">DTR オフ / RTS オフ</option>
+      </select>
+    </label>
+    <button id="go">開いて確認</button>
+    <button id="again" disabled>同じポートでもう一度</button>
+  </div>
+  <div id="result">—</div>
+  <table id="hist"><tr><th>回</th><th>開き方</th><th>結果</th><th>scans</th></tr></table>
+  <pre id="log"></pre>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let port = null, count = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function readFor(reader, ms) {
+  const dec = new TextDecoder();
+  let out = '';
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const timer = sleep(Math.max(1, end - Date.now())).then(() => null);
+    const r = await Promise.race([reader.read(), timer]);
+    if (r === null) break;       // timed out (the pending read carries over to the next call)
+    if (r.done) break;
+    out += dec.decode(r.value, { stream: true });
+  }
+  return out;
+}
+
+async function runTest() {
+  const mode = $('mode').value;
+  $('result').textContent = '確認中…';
+  $('result').className = '';
+  let out = '';
+  try {
+    await port.open({ baudRate: 115200 });
+    if (mode === 'dtr1rts0') await port.setSignals({ dataTerminalReady: true, requestToSend: false });
+    if (mode === 'dtr0rts0') await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+    const reader = port.readable.getReader();
+    const writer = port.writable.getWriter();
+    out += await readFor(reader, 2500);
+    await writer.write(new TextEncoder().encode('s'));
+    out += await readFor(reader, 1200);
+    writer.releaseLock();
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+    await port.close();
+  } catch (e) {
+    $('result').textContent = 'エラー: ' + e;
+    $('result').className = 'ng';
+    try { await port.close(); } catch (_) {}
+    return;
+  }
+  const m = [...out.matchAll(/scans=(\d+)/g)];
+  const scans = m.length ? Number(m[m.length - 1][1]) : null;
+  const booted = out.includes('ESP-ROM') || out.includes('ready (');
+  const reset = booted || (scans !== null && scans < 6000);
+  count++;
+  const label = $('mode').selectedOptions[0].textContent;
+  $('result').textContent = scans === null && !booted ? '応答なし（C6 のポートか、ファームを確認）'
+                         : reset ? 'リセットされた' : 'リセットされなかった';
+  $('result').className = reset ? 'ng' : 'ok';
+  const tr = $('hist').insertRow();
+  [count, label, $('result').textContent, scans === null ? '—' : scans].forEach(v => tr.insertCell().textContent = v);
+  $('log').textContent = out;
+}
+
+$('go').onclick = async () => {
+  if (!('serial' in navigator)) { $('result').textContent = 'このブラウザは Web Serial に対応していません（Chrome / Edge を使う）'; return; }
+  try { port = await navigator.serial.requestPort(); } catch (e) { return; }
+  $('again').disabled = false;
+  await runTest();
+};
+$('again').onclick = runTest;
+</script>
+</body>
+</html>
