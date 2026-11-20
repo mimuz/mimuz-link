@@ -8,18 +8,17 @@
  ver. history
 
  - 2026/11/19 : Start Writing
+ - 2026/11/20 : Remove the switch input (runs on a bare board)
 
 */
-// Test device (application): XIAO ESP32-C6 + one switch
+// Test device (application): bare XIAO ESP32-C6 (no external wiring)
 //
 // Communication is left to mimuz-link (libs/mimuz-link). This sketch contains only the device-specific parts:
-//   - switch (GPIO17), LED, and a production-like workload (workload.h)
+//   - LED and a production-like workload (workload.h)
 //   - handling of the test MIDI messages (mimuz_link_testproto.h; counterpart of latency_test.py on the PC)
 //   - a stand-in for a sound module (lights the LED on Note On from the PC, counts sounding notes)
 //   - test serial commands
 //
-// Switch      : GPIO17(D7) - 3.3V, external pull-down (pressed = High). Press = Note On(ch1, 60, 127) / release = Note Off
-//               Holding it at boot erases the bridge registration and pairs again
 // Serial      : USB CDC 115200 (requires board setting CDCOnBoot=Enabled)
 //   p / P     : radio round-trip time measurement, 10,000 / 100,000 times (ESP-NOW only)
 //   s         : show statistics   c: clear statistics
@@ -31,8 +30,6 @@
 #include <mimuz_link_testproto.h>
 #include "workload.h"
 
-#define BTN_PIN 17           // D7
-#define BTN_ACTIVE HIGH      // level when pressed
 #define LED_PIN LED_BUILTIN  // XIAO C6 user LED (Low = on)
 #define LED_ON LOW
 #define LED_OFF HIGH
@@ -172,13 +169,6 @@ static void serialCmd() {
     } else if (c == 'b' || c == 'e' || c == 'u') {
       Serial.printf("reboot: %s...\n", c == 'b' ? "BLE-MIDI" : c == 'e' ? "auto (bridge -> ESP-NOW, else BLE)" : "erase registration and pair again");
       mlink::restart(c == 'b' ? mlink::BOOT_BLE : c == 'e' ? mlink::BOOT_AUTO : mlink::BOOT_REPAIR);
-    } else if (c == 'n' || c == 'N') {  // disable / enable switch input (saved)
-      wl::btnEnabled = c == 'N';
-      Preferences ap;
-      ap.begin("app", false);
-      ap.putBool("btn", wl::btnEnabled);
-      ap.end();
-      Serial.printf("button input: %s (saved)\n", wl::btnEnabled ? "enabled" : "disabled");
     } else if (c == 's') {
       printStats();
     } else if (c == 'c') {
@@ -191,41 +181,18 @@ static void serialCmd() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BTN_PIN, BTN_ACTIVE == HIGH ? INPUT_PULLDOWN : INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LED_OFF);
-  delay(20);
-  {  // whether to use the switch input (toggled and saved with serial n / N; disable it on units without a switch)
-    Preferences ap;
-    ap.begin("app", true);
-    wl::btnEnabled = ap.getBool("btn", true);
-    ap.end();
-  }
-  // switch held at boot = erase registration and pair again
-  mlink::Config cfg;
-  cfg.repair = wl::btnEnabled && digitalRead(BTN_PIN) == BTN_ACTIVE;
-  if (cfg.repair) {  // wait for the switch to be released (so the release does not send a Note Off)
-    for (int i = 0; i < 6; i++) { digitalWrite(LED_PIN, i & 1 ? LED_OFF : LED_ON); delay(100); }
-    uint32_t t0 = millis();
-    while (digitalRead(BTN_PIN) == BTN_ACTIVE && millis() - t0 < 5000) delay(10);
-    delay(50);
-  }
   delay(1500);  // wait for USB CDC to connect (so the log can be read)
-  if (cfg.repair && digitalRead(BTN_PIN) == BTN_ACTIVE) {
-    // still active after 5 s = not the switch, the pin is stuck High. Continue without erasing the registration
-    cfg.repair = false;
-    wl::btnEnabled = false;  // do not use the switch during this boot
-    Serial.printf("warning: button pin GPIO%d stays active at boot (stuck or floating). ignoring it\n", BTN_PIN);
-  } else if (cfg.repair) {
-    Serial.println("button held at boot: erase registration and pair again");
-  }
+  // To erase the registration and pair again, use the serial command u (or the config command unpair)
+  mlink::Config cfg;
 
   mlink::onMidi(onMidi);
   mlink::onMidiFast(onMidiFast);
   mlink::Transport tr = mlink::begin(cfg);
 
   wl::begin(appSend, 12);  // scan task priority 12 (above the mimuz-link send task at 11)
-  Serial.printf("ready (%s). commands: p P s c r0..r3  b=BLE e=auto u=re-pair n/N=button off/on\n", tr == mlink::TR_BLE ? "BLE-MIDI" : "ESP-NOW");
+  Serial.printf("ready (%s). commands: p P s c r0..r3  b=BLE e=auto u=re-pair\n", tr == mlink::TR_BLE ? "BLE-MIDI" : "ESP-NOW");
 }
 
 void loop() {

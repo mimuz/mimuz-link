@@ -23,7 +23,7 @@ libs/mimuz-link/               link layer (header-only Arduino library)
 test/mimuz-link-test/          test message definitions (not part of the link layer)
   src/mimuz_link_testproto.h
 examples/
-  client/c6_test_device/       test client: C6 + one switch
+  client/c6_test_device/       test client: bare C6 board (no external wiring)
     c6_test_device.ino           test message handling, sound-module stand-in, serial commands
     workload.h                   simulated controller workload (1 ms scan, switch, encoder simulation)
   bridge/s3_bridge/            bridge: test handling and serial commands
@@ -108,16 +108,16 @@ arduino-cli compile -u -p <port> --libraries ../../libs --libraries ../../test \
 - Start the bridge first (the radio channel survey takes about 12 s), then the C6, and they connect right away. In the other order the C6 waits on BLE and searches for the bridge again every 20 s, so it still connects later.
 - On the first connection, macOS may hold the device at "Allow accessory to connect".
 
-## Wiring (test client)
+## Wiring
 
-C6: a tact switch between GPIO17 (D7) and 3.3V, with an external pull-down resistor between GPIO17 and GND (pressed = High). The S3 needs no wiring.
+None. The test client (C6) and the bridge (S3) both run on bare boards.
 
 ## Usage
 
 1. Plug the bridge into the PC and power on the C6.
    - An unregistered C6 registers and connects automatically if it is right next to the bridge.
    - A registered C6 connects to its stored bridge.
-   - Booting the C6 with the switch held erases its registration and registers again.
+   - To erase a C6's registration and register again, send `u` on its serial port (or the config command `unpair`).
 2. The PC sees `mi:muz:bridgeESPS3-<unique ID> Port 1` to `Port 8`. A connected C6 gets the lowest free port. Port numbers are not fixed per device; they follow the order in which devices connect.
 3. Without a bridge, the C6 waits as a BLE-MIDI device named `mi:muz:conESP32C6-<unique ID>`.
 
@@ -154,7 +154,7 @@ Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port>
 
 ## Serial commands (test firmware)
 
-- C6 (`c6_test_device`): `p` / `P` = measure the radio round trip 10,000 / 100,000 times, `s` = statistics, `c` = clear statistics, `r0`–`r3` = PHY rate, `b` = reboot fixed to BLE, `e` = reboot in automatic mode, `u` = erase registration and register again, `n` / `N` = disable / enable the switch input (saved).
+- C6 (`c6_test_device`): `p` / `P` = measure the radio round trip 10,000 / 100,000 times, `s` = statistics, `c` = clear statistics, `r0`–`r3` = PHY rate, `b` = reboot fixed to BLE, `e` = reboot in automatic mode, `u` = erase registration and register again.
 - Bridge (`s3_bridge`): `s` = statistics, `c` = clear statistics, `l` = list registrations and ports, `x` = erase all registrations, `v` = toggle logging of every message, `h` = radio channel survey results, `H` = survey again and choose, `1`–`9` and `A`–`D` = move to radio channel 1–13, `z` = stop receiving for 150 ms.
 
 ## PC tools (`examples/pc/`)

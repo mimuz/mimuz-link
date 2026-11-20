@@ -8,14 +8,15 @@
  ver. history
 
  - 2026/11/19 : Start Writing
+ - 2026/11/20 : Remove the switch input (runs on a bare board)
 
 */
 // Test device (application side): puts a production-like load on the C6
 //
 // - Scan task (1 ms period, woken by esp_timer):
 //     24-bit SPI transfer on the production board's pins (read 74HC165 x2 + write 74HC595), state-transition decoding of 4 encoders,
-//     reading the button (wired directly to GPIO17; on the production board it is read through the 165), and burst generation.
-//     MIDI for the button, burst and encoders is sent from this task (same structure as production).
+//     and burst generation.
+//     MIDI for the burst and encoders is sent from this task (same structure as production).
 // - loop() load: busy-wait for a given time on every loop() iteration (stand-in for LED effects etc.). CC ch16 #125 = value x 100 us
 // - Encoder simulation: CC ch16 #126 = rotation speed per encoder (clicks/s)
 // Used without the board, so MISO has an internal pull-down to read 0 (there is no real encoder input).
@@ -28,9 +29,6 @@
 namespace wl {
 
 static const int PIN_SCK = 19, PIN_MISO = 20, PIN_MOSI = 18, PIN_LATCH = 21;  // production board (D8/D9/D10/D3)
-static const int PIN_BTN = 17;  // test button (pressed = High)
-// Whether to use the switch input (false on units without a switch connected, because the pin triggers falsely)
-static volatile bool btnEnabled = true;
 static const uint32_t SPI_HZ = 2000000;
 
 typedef void (*SendFn)(uint8_t st, uint8_t d1, uint8_t d2);
@@ -50,7 +48,6 @@ static const int8_t ENC_TBL[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, 
 static uint8_t encPrev[4] = {0, 0, 0, 0};
 static int8_t encAcc[4] = {0, 0, 0, 0};
 
-// Button: press is immediate, release is confirmed after 5 ms continuous (judged at the 1 ms scan period)
 // Encoder simulation
 static volatile uint8_t encSimRate = 0;  // clicks/s (per encoder)
 static uint32_t encSimAcc = 0;
@@ -58,9 +55,6 @@ static uint8_t encSimPhase = 0;
 static const uint8_t QSEQ[4] = {0, 1, 3, 2};  // Gray code (1 click = 4 steps)
 static volatile uint32_t encSent = 0;
 static volatile bool extLed = false;  // for lighting the LED from outside (e.g. a received Note On)
-
-static bool btnDown = false;
-static uint8_t btnRel = 0;
 
 static void IRAM_ATTR onTick(void *) {
   BaseType_t w = pdFALSE;
@@ -112,22 +106,7 @@ static void scanTask(void *) {
       }
     }
 
-    // --- Button (on the production board it is read through the 165 at the same period)
-    bool act = btnEnabled && digitalRead(PIN_BTN) == HIGH;
-    if (!btnDown && act) {
-      btnDown = true;
-      btnRel = 0;
-      if (sendFn) sendFn(0x90, 60, 127);
-      ledByte |= 1;
-    } else if (btnDown) {
-      btnRel = act ? 0 : btnRel + 1;
-      if (btnRel >= 5) {
-        btnDown = false;
-        if (sendFn) sendFn(0x80, 60, 0);
-        ledByte &= ~1;
-      }
-    }
-    digitalWrite(LED_BUILTIN, (act || extLed) ? LOW : HIGH);  // lit by the button or by a Note On from the PC
+    digitalWrite(LED_BUILTIN, extLed ? LOW : HIGH);  // lit by a Note On from the PC
 
     // --- burst (period in 1 ms steps)
     if (burstPeriodMs) {
@@ -154,7 +133,6 @@ static void begin(SendFn fn, UBaseType_t prio) {
   sendFn = fn;
   pinMode(PIN_LATCH, OUTPUT);
   digitalWrite(PIN_LATCH, HIGH);
-  pinMode(PIN_BTN, INPUT_PULLDOWN);
   pinMode(LED_BUILTIN, OUTPUT);
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
   pinMode(PIN_MISO, INPUT_PULLDOWN);  // no board: read 0
