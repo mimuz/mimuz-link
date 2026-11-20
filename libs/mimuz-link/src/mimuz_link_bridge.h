@@ -8,6 +8,7 @@
  ver. history
 
  - 2026/11/19 : Start Writing
+ - 2026/11/21 : Send to clients in parallel by default (tx_parallel=1)
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -690,10 +691,11 @@ static void stallHandle() {
 // ---- Send task ----
 // Each client (port) has its own send queue and "one packet handed to the radio, awaiting its result".
 // Order is preserved only within one client; order across clients is not preserved.
-//   txParallel = false: only one packet in flight across all clients (same behavior as the single-queue send task)
-//   txParallel = true : one packet per client handed to the radio in parallel
+//   txParallel = true (default): one packet per client handed to the radio in parallel, so a client that is hard to reach
+//                                holds up the others less
+//   txParallel = false         : only one packet in flight across all clients (same behavior as the single-queue send task)
 // Either way, for one client the next packet is handed over only after the previous one's result, so order does not change.
-static volatile bool txParallel = false;
+static volatile bool txParallel = true;
 static volatile bool txImplOld = false;  // diagnostic: true = use the single-queue send task (txTaskOld) for comparison
 static TaskHandle_t txTaskNewH, txTaskOldH;
 static LatHist hTxQ;        // time from queuing to handing to the radio (first message of the batched packet)

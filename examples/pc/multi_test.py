@@ -8,6 +8,7 @@
 #  ver. history
 #
 #  - 2026/11/19 : Start Writing
+#  - 2026/11/21 : Add --only-b (run only the simultaneous round-trip test)
 #
 """Checks with several clients (C6) connected at the same time.
 
@@ -124,6 +125,7 @@ def main():
     ap.add_argument("--pings", type=int, default=1000)
     ap.add_argument("--pairs", type=int, default=500)
     ap.add_argument("--period", type=int, default=5, help="C6 が送る間隔 [ms]")
+    ap.add_argument("--only-b", action="store_true", help="run only section B (simultaneous round trips)")
     a = ap.parse_args()
     P = [Port(a.name, int(n)) for n in a.ports.split(",")]
     time.sleep(0.3)
@@ -142,6 +144,16 @@ def main():
             p.reset()
 
     clean()
+    if a.only_b:
+        print(f"== B. 全ポート同時の往復（各 {a.pings} 回、5〜10ms 間隔）")
+        res = {}
+        ths = [threading.Thread(target=lambda p=p: res.__setitem__(p.n, p.ping(a.pings))) for p in P]
+        [t.start() for t in ths]; [t.join() for t in ths]
+        for p in P:
+            r, lost = res[p.n]
+            verdict(f"Port {p.n}", lost == 0, f"{stat(r)} 取りこぼし={lost}")
+        return
+
     print(f"== A. ポートごとの往復（1 台ずつ、各 {a.pings // 5} 回）")
     for p in P:
         for q in P:

@@ -105,7 +105,7 @@ arduino-cli compile -u -p <port> --libraries ../../libs --libraries ../../test \
 
 - A brand-new XIAO ESP32-C6 does not start the firmware after its first upload until it is unplugged and plugged in again.
 - If uploading to the S3 reports `Failed uploading`, check `arduino-cli board list` for the bootloader port and run `arduino-cli upload` again on that port.
-- Start the bridge first (the radio channel survey takes about 12 s), then the C6, and they connect right away. In the other order the C6 waits on BLE and searches for the bridge again every 20 s, so it still connects later.
+- Start the bridge first (the radio channel survey takes about 12 s), then the C6, and they connect right away. In the other order a registered C6 waits on BLE and searches for its bridge again every 20 s, so it still connects later. An unregistered C6 does not search again; restart it near the bridge.
 - On the first connection, macOS may hold the device at "Allow accessory to connect".
 
 ## Wiring
@@ -146,7 +146,7 @@ Open the port with DTR on (the C6 resets if the port is opened with DTR off; the
 | bridge | `unregister <MAC\|all>` | remove a registration |
 | bridge | `resurvey` / `switch_channel <n>` | survey the radio channels again and choose one (about 12 s) / move to the given radio channel |
 | bridge | `port <n> <command…>` | relay a command over the radio to the client on port n (e.g. `@5 port 2 set rx_channels omni`). Resent every 150 ms until a reply arrives; `err timeout` after 1.5 s |
-| bridge | key `tx_parallel` | diagnostic: 1 = hand packets to the radio in parallel, one per client; 0 = one packet at a time overall (default). Not saved |
+| bridge | key `tx_parallel` | 1 = hand packets to the radio in parallel, one per client (default; a hard-to-reach client holds up the others less); 0 = one packet at a time overall, for comparison. Not saved |
 | bridge | keys `tx_fail_max`, `tx_probe` | diagnostic: number of consecutive failures before an unresponsive client is skipped (default 3); probe sends while skipped (1 = on; starts at 250 ms, doubling up to 1 s). Not saved |
 | bridge | key `tx_impl` | diagnostic: 0 = single-queue send task, 1 = per-client send task (default). For comparing both inside one firmware. Not saved |
 
