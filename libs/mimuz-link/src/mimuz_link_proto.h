@@ -8,6 +8,7 @@
  ver. history
 
  - 2026/11/19 : Start Writing
+ - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (enm_radio_send)
 
 */
 // mimuz-link: protocol definitions (shared by client and bridge)
@@ -17,6 +18,9 @@
 #include <string.h>
 #include <Print.h>
 #include <esp_now.h>
+#include <atomic>
+#include <Arduino.h>
+#include <esp_private/wifi_os_adapter.h>
 
 #define ENM_MAGIC 0xE7
 #define ENM_VERSION 8
@@ -33,6 +37,17 @@
 #define ENM_STALL_TIMEOUTS 5
 #define ENM_STALL_BACKOFF_MS 5000
 #define ENM_STALL_WIFI_WINDOW_MS 30000
+//   If the driver refuses every packet (NO_MEM) for 1 s, restarting ESP-NOW or Wi-Fi does not help, so the Wi-Fi driver is
+//   torn down and initialized again right away.
+//   If no send-complete callback at all arrives between restarts, the restarts escalate and are retried after
+//   ENM_STALL_RETRY_MS instead of ENM_STALL_BACKOFF_MS: after ENM_STALL_REINIT_AFTER such restarts in a row the Wi-Fi driver
+//   is initialized again, and after ENM_STALL_REBOOT_AFTER the device itself is restarted.
+//   Initializing the driver again after a real stall loses some internal memory, so when less than ENM_STALL_HEAP_MIN bytes
+//   of internal memory are free the device is restarted instead.
+#define ENM_STALL_RETRY_MS 1000
+#define ENM_STALL_REINIT_AFTER 1
+#define ENM_STALL_REBOOT_AFTER 3
+#define ENM_STALL_HEAP_MIN 24000
 #define MIMUZ_LINK_VERSION "0.1.0"
 // Config command relay:
 //   The bridge forwards a config command received over serial to the client on the given port with PKT_CMD.
@@ -167,6 +182,42 @@ static inline uint8_t enm_cb_type(const esp_now_send_info_t *info) {
   if (d[0] == ENM_MAGIC && d[1] == ENM_VERSION) return d[2];
   return 0;
 }
+
+// ---- Handing a packet to the radio ----
+// esp_now_send() puts the frame on the Wi-Fi driver's transmit cache queue without holding the driver's global lock, while
+// the driver task takes frames off that queue under the lock. When the two meet, the frame (and every later one) can be
+// lost from the queue: no send-complete notification ever comes, the driver soon refuses everything (NO_MEM), and only
+// initializing the driver again recovers it. Sending is therefore done under the same lock. The lock is recursive and is
+// always taken before the ESP-NOW lock (as esp_now_send() itself does), so the order of the two locks never inverts.
+// While the driver is torn down and initialized again (the lock is deleted and created again), nothing is sent:
+// call enm_radio_block() before tearing down and enm_radio_unblock() after ESP-NOW is up again.
+extern "C" {
+extern void *g_wifi_global_lock;
+extern wifi_osi_funcs_t *g_osi_funcs_p;
+}
+static volatile bool enmSendLock = true;  // diagnostic: false = call esp_now_send() without the lock
+static std::atomic<int> enmSendUsers{0};
+static std::atomic<bool> enmRadioDown{false};
+static esp_err_t IRAM_ATTR enm_radio_send(const uint8_t *mac, const uint8_t *d, size_t n) {
+  enmSendUsers++;
+  if (enmRadioDown) {
+    enmSendUsers--;
+    return ESP_ERR_ESPNOW_NOT_INIT;
+  }
+  void *lk = enmSendLock ? g_wifi_global_lock : nullptr;
+  if (lk) g_osi_funcs_p->_mutex_lock(lk);
+  esp_err_t e = esp_now_send(mac, d, n);
+  if (lk) g_osi_funcs_p->_mutex_unlock(lk);
+  enmSendUsers--;
+  return e;
+}
+// Stop new sends and wait (up to 100 ms) for sends in progress to finish
+static void enm_radio_block() {
+  enmRadioDown = true;
+  uint32_t t0 = millis();
+  while (enmSendUsers.load() > 0 && millis() - t0 < 100) vTaskDelay(1);
+}
+static void enm_radio_unblock() { enmRadioDown = false; }
 
 // ---- PHY rate (esp_now_set_peer_rate_config) ----
 // 0: 11b 1Mbps (ESP-NOW default)  1: 11g 6Mbps  2: 11g 24Mbps  3: HT20 MCS4(39Mbps)

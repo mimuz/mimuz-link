@@ -9,6 +9,13 @@
 
  - 2026/11/19 : Start Writing
  - 2026/11/21 : Send to clients in parallel by default (tx_parallel=1)
+ - 2026/11/21 : Escalate radio recovery (driver reinit, device restart); report heap
+ - 2026/11/21 : Reinitialize the driver at once when it refuses every packet; restart the device when memory runs low
+ - 2026/11/21 : Keep the channel and the port numbers across a restart caused by a stalled radio
+ - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (send_lock)
+ - 2026/11/22 : Trace how long marked messages spend in the bridge and on the radio (trace_status, trace)
+ - 2026/11/22 : Record radio sends whose result came late (slow_tx_ms, slowtx)
+ - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit, 8 by default)
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -41,6 +48,9 @@
 #include <esp_now.h>
 #include <esp_timer.h>
 #include <esp_cpu.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <new>
 // Frequently executed code (send task, receive handling, USB forwarding, send-complete callback) is placed in internal fast memory (IRAM).
 // This bypasses the flash cache and shortens the round trip by about 0.15 ms.
 // Define MIMUZ_LINK_NO_IRAM to place it in flash instead, for comparison.
@@ -222,11 +232,26 @@ static bool addPeer(const uint8_t *mac) {
   pi.ifidx = WIFI_IF_STA;
   return esp_now_add_peer(&pi) == ESP_OK;
 }
-// Assign the lowest-numbered free port. Returns -1 if full
+// Ports held for the clients that were connected before a restart caused by a stalled radio, so that each comes back on
+// the same port number (and the computer keeps routing it to the same place)
+#define PORT_KEEP_MS 30000
+static uint8_t keptMac[NUM_PORTS][6];
+static bool keptAny = false;
+static bool portKept(int k) {
+  if (!keptAny) return false;
+  if (millis() > PORT_KEEP_MS) { keptAny = false; return false; }
+  static const uint8_t zero[6] = {0};
+  return memcmp(keptMac[k], zero, 6) != 0;
+}
+// Assign the port held for this client, or else the lowest-numbered free port. Returns -1 if full
 static int portAssign(const uint8_t *mac, uint8_t rate) {
   int i = portFind(mac);
   if (i < 0) {
     for (int k = 0; k < NUM_PORTS && i < 0; k++)
+      if (!ports[k].active && portKept(k) && !memcmp(keptMac[k], mac, 6)) i = k;
+    for (int k = 0; k < NUM_PORTS && i < 0; k++)
+      if (!ports[k].active && !portKept(k)) i = k;
+    for (int k = 0; k < NUM_PORTS && i < 0; k++)  // all free ports are held: give up holding one
       if (!ports[k].active) i = k;
     if (i < 0) return -1;
     if (!addPeer(mac)) return -1;
@@ -265,7 +290,7 @@ static void sendTo(const uint8_t *mac, const enm_pkt_t &p) {
     tmpValid = addPeer(mac);
     memcpy(tmpMac, mac, 6);
   }
-  esp_now_send(mac, (const uint8_t *)&p, sizeof(p));
+  enm_radio_send(mac, (const uint8_t *)&p, sizeof(p));
 }
 static void reply(const uint8_t *mac, uint8_t type, uint16_t aux, uint16_t seq = 0) {
   enm_pkt_t r;
@@ -288,6 +313,79 @@ struct RxItem {
 };
 static QueueHandle_t rxq, logq;
 static TaskHandle_t usbInTaskH;
+
+// ---- Message trace (diagnostic) ----
+// When traceStatus is not 0, each message from the PC whose status byte equals it is stamped when it arrives over USB,
+// keyed by its port and its two data bytes. When the client on that port sends the same message back, the bridge records
+// the time from the USB arrival until the reply has been written to USB, and the part of it until the reply arrived over
+// the radio. Subtracting the first from the round trip measured on the PC gives the time spent on the PC and USB side.
+// The TRACE_TOP slowest are kept with their keys so that the PC can match them with its own slowest round trips.
+// The tables (about 10 KB of internal memory) are allocated only while tracing is on, so that they do not reduce the
+// memory left for restarting the radio driver.
+#define TRACE_SLOTS 32
+#define TRACE_TOP 16
+struct TraceSlot { uint32_t tIn; uint16_t key; bool used; };
+struct TraceTop { uint32_t inUs, totalUs, radioUs; uint16_t key; uint8_t port; };
+struct TraceData {
+  TraceSlot slot[NUM_PORTS][TRACE_SLOTS];
+  LatHist h;  // USB arrival of a traced message -> USB write of its reply complete
+};
+static volatile uint8_t traceStatus = 0;
+static TraceData *volatile trace = nullptr;
+static TraceTop traceTop[TRACE_TOP];
+static uint8_t traceTopN;
+static volatile uint32_t traceDoneN, traceMiss;
+static inline uint16_t traceKey(const uint8_t *m) { return (uint16_t)(m[1] | (m[2] << 7)); }
+static void MLINK_HOT traceIn(uint8_t port, const uint8_t *m) {
+  TraceData *td = trace;
+  if (!td) return;
+  uint16_t k = traceKey(m);
+  TraceSlot &s = td->slot[port][k % TRACE_SLOTS];
+  s.key = k;
+  s.tIn = now_us();
+  s.used = true;
+}
+static void traceOut(const RxItem &it, uint32_t tDone) {
+  TraceData *td = trace;
+  if (!td) return;
+  uint16_t k = traceKey(it.m);
+  TraceSlot &s = td->slot[it.port][k % TRACE_SLOTS];
+  if (!s.used || s.key != k) { traceMiss++; return; }
+  s.used = false;
+  TraceTop t = {s.tIn, tDone - s.tIn, it.t_cb - s.tIn, k, it.port};
+  td->h.add(t.totalUs);
+  traceDoneN++;
+  if (traceTopN < TRACE_TOP) { traceTop[traceTopN++] = t; return; }
+  int lo = 0;
+  for (int i = 1; i < TRACE_TOP; i++) if (traceTop[i].totalUs < traceTop[lo].totalUs) lo = i;
+  if (t.totalUs > traceTop[lo].totalUs) traceTop[lo] = t;
+}
+static void traceClear() {
+  TraceData *td = trace;
+  if (td) {
+    memset(td->slot, 0, sizeof(td->slot));
+    td->h.reset();
+  }
+  traceTopN = 0;
+  traceDoneN = traceMiss = 0;
+}
+// Turns tracing on (status byte) or off (0). Returns false if the tables could not be allocated
+static bool traceSet(uint8_t st) {
+  traceStatus = 0;
+  if (!st) {
+    TraceData *td = trace;
+    trace = nullptr;
+    vTaskDelay(pdMS_TO_TICKS(5));  // let a task that is inside traceIn / traceOut finish
+    delete td;
+    traceClear();
+    return true;
+  }
+  if (!trace) trace = new (std::nothrow) TraceData();
+  if (!trace) return false;
+  traceClear();
+  traceStatus = st;
+  return true;
+}
 
 // ---- PC -> C6 send queue (callers wait when sending is congested) ----
 struct TxItem {
@@ -428,6 +526,7 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
     ports[i].rxPktCnt = 0;
     ports[i].txFailCnt = 0;
     ports[i].haveSeq = false;
+    ports[i].haveOff = false;  // its clock started again, so the offset to it has changed
     ports[i].txSeq = 0;
     ports[i].rxChMask = p.seq;   // the C6 announces its listening channels on every connect
     ports[i].subFlags = p.len;
@@ -460,7 +559,7 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
   switch (p.type) {
     case PKT_PING: {  // reply immediately, highest priority
       p.type = PKT_PONG;
-      esp_now_send(src, (const uint8_t *)&p, sizeof(p));
+      enm_radio_send(src, (const uint8_t *)&p, sizeof(p));
       break;
     }
     case PKT_MIDI: {  // arrives batched; the 4th byte is the count
@@ -551,9 +650,11 @@ static void MLINK_HOT fwdTask(void *) {
       vTaskDelay(1);
       ok = usbWrite(it.port, it.m, it.len);
     }
-    uint32_t dt = now_us() - it.t_cb;
+    uint32_t tDone = now_us();
+    uint32_t dt = tDone - it.t_cb;
     if (!ok) usbFail++;
     else hCb2Usb.add(dt);
+    if (ok && traceStatus && it.m[0] == traceStatus) traceOut(it, tDone);
     rxMidi++;
     Port &pt = ports[it.port];
     if (pt.haveSeq && it.seq != (uint16_t)(pt.lastSeq + 1)) seqGap += (uint16_t)(it.seq - pt.lastSeq - 1);
@@ -593,6 +694,7 @@ static void MLINK_HOT usbInTask(void *) {
       if (L < 2) m[1] = 0;
       if (usbMidiHandler && usbMidiHandler(port, m)) continue;  // handled by the application
       if (port >= NUM_PORTS || !ports[port].active) continue;  // send only to the C6 connected to that port
+      if (traceStatus && m[0] == traceStatus) traceIn(port, m);
       TxItem it;
       it.port = port;
       memcpy(it.mac, ports[port].mac, 6);
@@ -648,18 +750,69 @@ struct PTx {
 static PTx ptx[NUM_PORTS];
 static void ptxAbortInflight();
 
+// ---- Radio retry limit ----
+// The radio sends the frames handed to it one after another. While it retries a frame that is not acknowledged (a far
+// client), the frames behind it wait, so one undelivered frame can hold up every other client for 10-20 ms.
+// The Wi-Fi library keeps its retry limits in lmacConfMib (byte 21 = frames below the RTS threshold, which all ESP-NOW
+// frames are; byte 20 = longer frames) and sets them with esp_wifi_internal_set_retry_counter(short, long). Neither is
+// in the public headers. The limit is read again on every failed attempt, so a change applies at once.
+// The library's limit is 32. With 8, the longest delays of near clients while a far client (about -87 dBm) does not
+// answer were about 2.6 ms shorter (p99 about 0.9 ms), while that far client lost about 0.6% of its packets instead of
+// 0.08% (Note Offs are resent by this bridge). Going below 8 did not shorten the delays further and lost more packets.
+// retryLimit = 0 leaves the library's value; otherwise it is applied at startup and again after every restart of the radio.
+#define ENM_RETRY_LIMIT_DEFAULT 8
+extern "C" uint8_t lmacConfMib[];
+extern "C" esp_err_t esp_wifi_internal_set_retry_counter(uint8_t src, uint8_t lrc);
+static uint8_t retryLimit = ENM_RETRY_LIMIT_DEFAULT;
+static uint8_t retryDefShort = 0, retryDefLong = 0;  // the library's values, read at startup
+static void retryApply() {
+  if (!retryDefShort && !retryDefLong) { retryDefShort = lmacConfMib[21]; retryDefLong = lmacConfMib[20]; }
+  if (retryLimit) esp_wifi_internal_set_retry_counter(retryLimit, retryLimit);
+  else esp_wifi_internal_set_retry_counter(retryDefShort, retryDefLong);
+}
+
+// ---- Slow radio sends (diagnostic) ----
+// A packet whose result (delivered or not) came slowTxUs or more after it was handed to the radio is recorded with its
+// port, times and result, so that the PC can see which packets were held up together, and whether an undelivered packet
+// (which the radio keeps retrying) came first. Times are the bridge's microsecond clock (as in_us of the trace).
+// The last SLOWTX_N are kept.
+#define SLOWTX_N 64
+#define SLOWTX_OK 0x01       // delivered
+#define SLOWTX_RESEND 0x02   // a Note Off resend packet
+#define SLOWTX_TIMEOUT 0x04  // no result at all (counted as not delivered)
+struct SlowTx { uint32_t sentUs, airUs; uint16_t noMem; uint8_t port, flags, len; int8_t rssi; };
+static SlowTx slowTx[SLOWTX_N];
+static volatile uint32_t slowTxN;
+static volatile uint32_t slowTxUs = 10000;
+
 // ---- Detecting and restarting a stalled radio driver ----
-static volatile uint32_t stallRestarts, wifiRestarts;
+static volatile uint32_t stallRestarts, wifiRestarts, driverReinits;
+static uint32_t stallReboots;  // restarts of the whole device because the radio could not be recovered (saved)
 static volatile bool debugStallFlag = false;  // diagnostic: drop send-complete notifications to simulate a stall (cleared by restart)
+static volatile bool debugStallHold = false;  // diagnostic: keep simulating the stall across radio restarts (to test escalation)
 static uint32_t lastRestartMs = 0;
 static uint8_t txTimeoutStreak = 0;
 static uint16_t noMemStreak = 0;
+static volatile bool cbSinceRestart = true;  // a send-complete callback arrived since the last restart (the driver is working)
+static uint8_t noRecover = 0;                // restarts in a row after which no send-complete callback arrived
 static void onSent(const esp_now_send_info_t *info, esp_now_send_status_t st);
-// Restart ESP-NOW (and Wi-Fi if withWifi = true). Restores connected clients (peer entries, rates) and the channel
-static void radioRestart(bool withWifi) {
-  evlog(withWifi ? "radio stalled again: restarting Wi-Fi and ESP-NOW" : "radio stalled: restarting ESP-NOW");
+// Restart the radio. level 0 = ESP-NOW, 1 = also Wi-Fi (stop / start), 2 = also tear down and initialize the Wi-Fi driver.
+// Restores connected clients (peer entries, rates) and the channel
+static void radioRestart(uint8_t level) {
+  static const char *const msg[] = {"radio stalled: restarting ESP-NOW", "radio stalled again: restarting Wi-Fi and ESP-NOW",
+                                    "radio not recovering: initializing the Wi-Fi driver again"};
+  uint32_t t0 = millis();
+  size_t h0 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  evlog("%s (internal heap %u)", msg[level > 2 ? 2 : level], (unsigned)h0);
+  enm_radio_block();
+  if (level >= 2) esp_wifi_stop();  // stop first so that frames queued in the stalled driver are released
   esp_now_deinit();
-  if (withWifi) {
+  if (level >= 2) {
+    WiFi.mode(WIFI_OFF);  // stops and deinitializes the Wi-Fi driver
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+  } else if (level == 1) {
     esp_wifi_stop();
     esp_wifi_start();
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -668,24 +821,55 @@ static void radioRestart(bool withWifi) {
   esp_now_init();
   esp_now_register_recv_cb(onRecv);
   esp_now_register_send_cb(onSent);
+  enm_radio_unblock();
   tmpValid = false;
   for (int i = 0; i < NUM_PORTS; i++) {
     if (!ports[i].active) continue;
     addPeer(ports[i].mac);
     enm_apply_rate(ports[i].mac, ports[i].rate);
   }
-  debugStallFlag = false;
+  if (retryLimit) retryApply();
+  if (!debugStallHold) debugStallFlag = false;
   ptxAbortInflight();  // notifications for packets already handed over will never arrive
   txTimeoutStreak = 0;
   noMemStreak = 0;
+  cbSinceRestart = false;
   lastRestartMs = millis();
-  if (withWifi) wifiRestarts++;
+  if (level >= 2) driverReinits++;
+  else if (level == 1) wifiRestarts++;
   else stallRestarts++;
+  evlog("radio restarted in %lu ms (internal heap %u -> %u)", (unsigned long)(millis() - t0), (unsigned)h0,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
-static void stallHandle() {
+// Survives a software restart: tells begin() to keep the channel instead of surveying again (so clients are back in seconds)
+#define STALL_BOOT_MAGIC 0x5A11B000u
+RTC_NOINIT_ATTR static uint32_t stallBootTag;
+RTC_NOINIT_ATTR static uint8_t stallBootMac[NUM_PORTS][6];  // client on each port before the restart (all 0 = none)
+static void stallReboot(const char *why) {
+  evlog("%s: restarting the device", why);
+  prefs.putULong("stallboot", stallReboots + 1);
+  for (int i = 0; i < NUM_PORTS; i++) {
+    if (ports[i].active) memcpy(stallBootMac[i], ports[i].mac, 6);
+    else memset(stallBootMac[i], 0, 6);
+  }
+  stallBootTag = STALL_BOOT_MAGIC | wifiChannel;
+  delay(200);  // let the log reach serial
+  esp_restart();
+}
+// noMem: the driver has refused every packet for 1 s (rather than accepting packets and never reporting their results)
+static void stallHandle(bool noMem) {
   uint32_t since = millis() - lastRestartMs;
-  if (lastRestartMs && since < ENM_STALL_BACKOFF_MS) return;  // do not restart back to back
-  radioRestart(lastRestartMs && since < ENM_STALL_WIFI_WINDOW_MS);
+  // do not restart back to back. If the last restart did not bring the driver back, retry sooner
+  if (lastRestartMs && since < (cbSinceRestart ? ENM_STALL_BACKOFF_MS : ENM_STALL_RETRY_MS)) return;
+  if (cbSinceRestart) noRecover = 0;
+  else if (noRecover < 255) noRecover++;
+  // nothing helped: restart the device (USB disconnects and comes back)
+  if (noRecover >= ENM_STALL_REBOOT_AFTER) stallReboot("radio not recovering");
+  bool reinit = noMem || noRecover >= ENM_STALL_REINIT_AFTER;
+  if (reinit && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < ENM_STALL_HEAP_MIN) stallReboot("radio stalled, low memory");
+  if (reinit) radioRestart(2);
+  else if (lastRestartMs && since < ENM_STALL_WIFI_WINDOW_MS) radioRestart(1);
+  else radioRestart(0);
 }
 
 // ---- Send task ----
@@ -794,7 +978,8 @@ static bool MLINK_HOT ptxBuild(int i) {
   }
   if (n == 0) return false;
   q.enqUs = first.t_us;
-  hQWake.add(loopUs - first.t_us);
+  int32_t wake = (int32_t)(loopUs - first.t_us);  // negative when queued after this pass of the send task started
+  hQWake.add(wake > 0 ? (uint32_t)wake : 0);
   enm_pkt_t h = first;
   h.len = n;
   q.seq0 = pt.txSeq;  // sequence numbers are assigned here, once the send order is fixed
@@ -841,10 +1026,11 @@ static void MLINK_HOT txTask(void *) {
       PTx &q = ptx[i];
       if (!q.inflight) continue;
       uint8_t r = q.result;
+      bool timedOut = !r;
       if (!r) {
         if (millis() - q.sentMs < 100) continue;
         txTimeouts++;  // no completion notification (delivery unknown). If it persists, the driver is stalled
-        if (++txTimeoutStreak >= ENM_STALL_TIMEOUTS) stallHandle();
+        if (++txTimeoutStreak >= ENM_STALL_TIMEOUTS) stallHandle(false);
         r = 2;
       } else {
         txTimeoutStreak = 0;
@@ -852,6 +1038,14 @@ static void MLINK_HOT txTask(void *) {
         hTxAir.add(w - q.sentUs);
         hSendCb.add(q.cbUs - q.sentUs);
         hCbWake.add(w - q.cbUs);
+      }
+      uint32_t air = (timedOut ? now_us() : q.cbUs) - q.sentUs;
+      if (slowTxUs && air >= slowTxUs) {
+        SlowTx &e = slowTx[slowTxN % SLOWTX_N];
+        e = {q.sentUs, air, (uint16_t)txRetry, (uint8_t)i,
+             (uint8_t)((r == 1 ? SLOWTX_OK : 0) | (q.isRetry ? SLOWTX_RESEND : 0) | (timedOut ? SLOWTX_TIMEOUT : 0)),
+             (uint8_t)(q.len > 255 ? 255 : q.len), ports[i].rssi};
+        slowTxN++;
       }
       ptxComplete(i, r);
     }
@@ -869,16 +1063,16 @@ static void MLINK_HOT txTask(void *) {
       q.result = 0;
       q.sentMs = millis();
       q.sentUs = now_us();
-      if (!q.isRetry) hTxQ.add(q.sentUs - q.enqUs);
       q.inflight = true;  // set before handing over, in case the completion notification arrives first
       txInflight++;
       uint32_t ca = esp_cpu_get_cycle_count();
-      esp_err_t e = esp_now_send(q.mac, q.pkt, q.len);
+      esp_err_t e = enm_radio_send(q.mac, q.pkt, q.len);
       cycApi += esp_cpu_get_cycle_count() - ca;
       hApi.add(now_us() - q.sentUs);
       if (e == ESP_OK) twPackets++;
       if (e == ESP_OK) {
         noMemStreak = 0;
+        if (!q.isRetry) hTxQ.add(q.sentUs - q.enqUs);
         if (txInflight > txInflightPeak) txInflightPeak = txInflight;
         continue;
       }
@@ -886,7 +1080,7 @@ static void MLINK_HOT txTask(void *) {
       txInflight--;
       if (e == ESP_ERR_ESPNOW_NO_MEM) {  // the radio cannot accept. Keep the built packet and hand it over again on the next pass
         txRetry++;
-        if (++noMemStreak >= 1000) { noMemStreak = 0; stallHandle(); }
+        if (++noMemStreak >= 1000) { noMemStreak = 0; stallHandle(true); }
         break;
       }
       txErr++;  // peer not registered, etc. Drop this packet (Note Offs go to resend)
@@ -914,7 +1108,7 @@ static bool MLINK_HOT txSendWaitOld(const uint8_t *mac, const uint8_t *buf, size
     txWaitStartUs = now_us();
     txWaiting = true;
     uint32_t sU = now_us();
-    esp_err_t e = esp_now_send(mac, buf, len);
+    esp_err_t e = enm_radio_send(mac, buf, len);
     hApi.add(now_us() - sU);
     if (e == ESP_OK) {
       uint32_t t0 = millis();
@@ -927,7 +1121,7 @@ static bool MLINK_HOT txSendWaitOld(const uint8_t *mac, const uint8_t *buf, size
       txWaiting = false;
       if (!txDone) {  // no completion notification (delivery unknown). If it persists, the driver is stalled
         txTimeouts++;
-        if (++txTimeoutStreak >= ENM_STALL_TIMEOUTS) stallHandle();
+        if (++txTimeoutStreak >= ENM_STALL_TIMEOUTS) stallHandle(false);
       } else {
         txTimeoutStreak = 0;
       }
@@ -937,7 +1131,7 @@ static bool MLINK_HOT txSendWaitOld(const uint8_t *mac, const uint8_t *buf, size
     txRetry++;
     if (++noMemStreak >= 1000) {  // not accepted for 1 second -> stalled
       noMemStreak = 0;
-      stallHandle();
+      stallHandle(true);
       return false;
     }
     vTaskDelay(1);  // filled by other sends (PONG etc.). Wait 1 ms and retry
@@ -1054,6 +1248,7 @@ static void MLINK_HOT txTaskOld(void *) {
 // Send complete (MAC-layer ACK received, or not delivered after retries)
 static void MLINK_HOT onSent(const esp_now_send_info_t *info, esp_now_send_status_t st) {
   if (debugStallFlag) return;
+  cbSinceRestart = true;
   if (info && info->des_addr) {
     int i = portFind(info->des_addr);
     if (i >= 0) {
@@ -1190,7 +1385,7 @@ static void channelSwitch(uint8_t ch) {
         enm_pkt_t r;
         enm_init(r, PKT_CH_SWITCH);
         r.aux = ch;
-        esp_now_send(ports[i].mac, (const uint8_t *)&r, sizeof(r));
+        enm_radio_send(ports[i].mac, (const uint8_t *)&r, sizeof(r));
         delay(15);
       }
   delay(30);
@@ -1232,8 +1427,15 @@ static void printStats(Print &o) {
   hSendCb.print(o, "tx send->cb    ");
   hCbWake.print(o, "tx cb->wake    ");
   hTxAir.print(o, "tx radio->done ");
-  o.printf("tx: parallel=%u inflightPeak=%lu | config relay resends=%lu\n", txParallel ? 1 : 0, (unsigned long)txInflightPeak, (unsigned long)relayResends);
-  o.printf("radio stall: espnowRestarts=%lu wifiRestarts=%lu | duplicate packets dropped=%lu\n", (unsigned long)stallRestarts, (unsigned long)wifiRestarts, (unsigned long)rxPktDup);
+  o.printf("tx: parallel=%u sendLock=%u inflightPeak=%lu | config relay resends=%lu\n", txParallel ? 1 : 0, enmSendLock ? 1 : 0,
+           (unsigned long)txInflightPeak, (unsigned long)relayResends);
+  o.printf("radio stall: espnowRestarts=%lu wifiRestarts=%lu driverReinits=%lu stallReboots=%lu | duplicate packets dropped=%lu\n",
+           (unsigned long)stallRestarts, (unsigned long)wifiRestarts, (unsigned long)driverReinits, (unsigned long)stallReboots,
+           (unsigned long)rxPktDup);
+  o.printf("heap: free=%u min=%u largest=%u | internal free=%u min=%u largest=%u | uptime=%lus\n", (unsigned)esp_get_free_heap_size(),
+           (unsigned)esp_get_minimum_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned long)(millis() / 1000));
   o.printf("tx done cb: midi=%lu other=%lu (last other type=%u) lateMidi=%lu (last late %.1fms) timeouts=%lu\n", (unsigned long)cbMidi,
                 (unsigned long)cbOther, cbLastOtherType, (unsigned long)cbLateMidi, cbLateUs / 1000.0, (unsigned long)txTimeouts);
   o.printf("C6->PC: usbRetry=%lu  ", (unsigned long)usbRetry);
@@ -1243,6 +1445,11 @@ static void printStats(Print &o) {
                 (unsigned long)txqPeak, TXQ_LEN);
   hCb2Usb.print(o, "S3 recvCB->USB write");
   hRel.print(o, "radio 相対遅延(最小=0)");
+  TraceData *td = trace;
+  if (traceStatus && td) {
+    o.printf("trace: status=0x%02X done=%lu missed=%lu\n", traceStatus, (unsigned long)traceDoneN, (unsigned long)traceMiss);
+    td->h.print(o, "trace USB in->reply USB out");
+  }
 }
 
 // ================= Public functions =================
@@ -1298,6 +1505,8 @@ static void clearStats() {
   pktFail = 0; offRetried = 0; offRecovered = 0; offGiveUp = 0; retryAccepted = 0; retryDup = 0; rxPktDup = 0; noteOnExpired = 0; busRouted = 0; busDrop = 0;
   rssiSum = 0; rssiN = 0; hRel.reset(); hTxQ.reset(); hTxAir.reset(); twCycles = 0; twPackets = 0; twMaxCycles = 0; hQWake.reset(); hApi.reset(); hSendCb.reset(); hCbWake.reset();
   for (int i = 0; i < NUM_PORTS; i++) ports[i].haveSeq = ports[i].haveOff = false;
+  traceClear();
+  slowTxN = 0;
 }
 
 // ---- Saving and loading settings (non-volatile memory) ----
@@ -1312,6 +1521,7 @@ static void loadSettings() {
   chMax = prefs.getUChar("chmax", 13);
   if (chMin < 1 || chMax > 13 || chMin > chMax) { chMin = 1; chMax = 13; }
   noteOnMaxAgeMs = prefs.getUShort("age", ENM_NOTEON_MAX_AGE_MS);
+  stallReboots = prefs.getULong("stallboot", 0);
 }
 
 // ---- Configuration commands (called from mimuz_link_cmd.h) ----
@@ -1343,7 +1553,7 @@ static void cmdExec(const Cmd &c, Print &o) {
     relayReplyReady = false;
     relayLen = ENM_HDR_LEN + bp.length();
     memcpy(relayMac, ports[v - 1].mac, 6);
-    if (esp_now_send(relayMac, buf, relayLen) != ESP_OK) { cmdErr(c, o, "send_failed"); return; }
+    if (enm_radio_send(relayMac, buf, relayLen) != ESP_OK) { cmdErr(c, o, "send_failed"); return; }
     strlcpy(relayId, c.id, sizeof(relayId));
     relayLastSendMs = millis();
     relayDeadline = relayLastSendMs + RELAY_TIMEOUT_MS;  // the reply is printed in loop(). If none arrives, resend; if still none, timeout
@@ -1364,6 +1574,12 @@ static void cmdExec(const Cmd &c, Print &o) {
     else if (!strcmp(c.argv[1], "tx_probe")) o.printf("@%s ok tx_probe=%u\n", c.id, txProbe ? 1 : 0);
     else if (!strcmp(c.argv[1], "tx_impl")) o.printf("@%s ok tx_impl=%u\n", c.id, txImplOld ? 0 : 1);
     else if (!strcmp(c.argv[1], "tx_parallel")) o.printf("@%s ok tx_parallel=%u\n", c.id, txParallel ? 1 : 0);
+    else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    else if (!strcmp(c.argv[1], "trace_status")) o.printf("@%s ok trace_status=%u\n", c.id, traceStatus);
+    else if (!strcmp(c.argv[1], "retry_limit"))
+      o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, lmacConfMib[21],
+               lmacConfMib[20], retryDefShort, retryDefLong);
+    else if (!strcmp(c.argv[1], "slow_tx_ms")) o.printf("@%s ok slow_tx_ms=%lu\n", c.id, (unsigned long)(slowTxUs / 1000));
     else cmdErr(c, o, "unknown_key");
   } else if (cmdIs(c, "set")) {
     if (c.argc < 3 || !cmdUint(c.argv[2], v)) { cmdErr(c, o, "usage:set_<key>_<value>"); return; }
@@ -1396,7 +1612,54 @@ static void cmdExec(const Cmd &c, Print &o) {
     } else if (!strcmp(c.argv[1], "tx_parallel")) {  // diagnostic: 1 = hand packets to the radio in parallel, one per client (not saved)
       txParallel = v != 0;
       o.printf("@%s ok tx_parallel=%u\n", c.id, txParallel ? 1 : 0);
+    } else if (!strcmp(c.argv[1], "send_lock")) {  // diagnostic: 1 = hand packets to the radio under the driver's lock (not saved)
+      enmSendLock = v != 0;
+      o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    } else if (!strcmp(c.argv[1], "retry_limit")) {  // radio retry limit, 0 = the library's value (not saved)
+      if (v > 31) { cmdErr(c, o, "bad_value"); return; }
+      retryLimit = (uint8_t)v;
+      retryApply();
+      o.printf("@%s ok retry_limit=%u short=%u long=%u\n", c.id, retryLimit, lmacConfMib[21], lmacConfMib[20]);
+    } else if (!strcmp(c.argv[1], "slow_tx_ms")) {  // diagnostic: record radio sends whose result took this long, 0 = off (not saved)
+      if (v > 1000) { cmdErr(c, o, "bad_value"); return; }
+      slowTxUs = v * 1000;
+      o.printf("@%s ok slow_tx_ms=%lu\n", c.id, (unsigned long)v);
+    } else if (!strcmp(c.argv[1], "trace_status")) {  // diagnostic: status byte of the messages to trace, 0 = off (not saved)
+      if (v != 0 && (v < 0x80 || v > 0xEF)) { cmdErr(c, o, "bad_value"); return; }
+      if (!traceSet((uint8_t)v)) { cmdErr(c, o, "no_memory"); return; }
+      o.printf("@%s ok trace_status=%u\n", c.id, traceStatus);
     } else cmdErr(c, o, "unknown_key");
+  } else if (cmdIs(c, "slowtx")) {  // radio sends whose result came late, oldest first; "slowtx clear" starts over
+    if (c.argc >= 2 && !strcmp(c.argv[1], "clear")) {
+      slowTxN = 0;
+      o.printf("@%s ok cleared\n", c.id);
+      return;
+    }
+    uint32_t n = slowTxN, from = n > SLOWTX_N ? n - SLOWTX_N : 0;
+    for (uint32_t k = from; k < n; k++) {
+      SlowTx e = slowTx[k % SLOWTX_N];
+      o.printf("@%s + port=%d sent_us=%lu air_us=%lu ok=%u resend=%u timeout=%u len=%u rssi=%d nomem=%u\n", c.id, e.port + 1,
+               (unsigned long)e.sentUs, (unsigned long)e.airUs, (e.flags & SLOWTX_OK) ? 1 : 0, (e.flags & SLOWTX_RESEND) ? 1 : 0,
+               (e.flags & SLOWTX_TIMEOUT) ? 1 : 0, e.len, e.rssi, e.noMem);
+    }
+    o.printf("@%s ok count=%lu total=%lu now_us=%lu\n", c.id, (unsigned long)(n - from), (unsigned long)n, (unsigned long)now_us());
+  } else if (cmdIs(c, "trace")) {  // slowest traced messages, slowest first; "trace clear" starts over
+    if (c.argc >= 2 && !strcmp(c.argv[1], "clear")) {
+      traceClear();
+      o.printf("@%s ok cleared\n", c.id);
+      return;
+    }
+    TraceTop t[TRACE_TOP];
+    uint8_t n = traceTopN;
+    memcpy(t, traceTop, sizeof(t));
+    for (int i = 1; i < n; i++)
+      for (int j = i; j > 0 && t[j].totalUs > t[j - 1].totalUs; j--) { TraceTop x = t[j]; t[j] = t[j - 1]; t[j - 1] = x; }
+    for (int i = 0; i < n; i++)
+      o.printf("@%s + port=%d key=%u total_us=%lu radio_us=%lu in_us=%lu\n", c.id, t[i].port + 1, t[i].key, (unsigned long)t[i].totalUs,
+               (unsigned long)t[i].radioUs, (unsigned long)t[i].inUs);
+    o.printf("@%s ok count=%d done=%lu missed=%lu p50_us=%lu p99_us=%lu max_us=%lu\n", c.id, n, (unsigned long)traceDoneN,
+             (unsigned long)traceMiss, (unsigned long)(trace ? trace->h.pct(0.5) : 0), (unsigned long)(trace ? trace->h.pct(0.99) : 0),
+             (unsigned long)(trace ? trace->h.mx : 0));
   } else if (cmdIs(c, "ports")) {  // connected ports, one per line
     int cnt = 0;
     for (int i = 0; i < NUM_PORTS; i++) {
@@ -1427,14 +1690,15 @@ static void cmdExec(const Cmd &c, Print &o) {
       regSave();
       o.printf("@%s ok registered=%d\n", c.id, regCount);
     } else cmdErr(c, o, "bad_value");
-  } else if (cmdIs(c, "radio_restart")) {  // diagnostic: restart ESP-NOW (with wifi, also Wi-Fi)
+  } else if (cmdIs(c, "radio_restart")) {  // diagnostic: restart ESP-NOW (wifi: also Wi-Fi, driver: also reinitialize the Wi-Fi driver)
     if (c.argc > 1 && !strcmp(c.argv[1], "stall")) {  // simulate a stall; it should be detected and the radio restarted automatically
       debugStallFlag = true;
+      debugStallHold = c.argc > 2 && !strcmp(c.argv[2], "hold");  // hold: the stall survives restarts, so recovery escalates
       o.printf("@%s ok simulating_stall\n", c.id);
       return;
     }
     o.printf("@%s ok restarting_radio\n", c.id);
-    radioRestart(c.argc > 1 && !strcmp(c.argv[1], "wifi"));
+    radioRestart(c.argc > 1 && !strcmp(c.argv[1], "driver") ? 2 : c.argc > 1 && !strcmp(c.argv[1], "wifi") ? 1 : 0);
   } else if (cmdIs(c, "resurvey")) {  // re-measure and re-choose the channel (takes about 12 s)
     uint8_t to = resurvey();
     o.printf("@%s ok radio_channel=%u\n", c.id, to);
@@ -1466,14 +1730,29 @@ static void begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
-  // Measure congestion on all channels at startup and choose the channel (about 12 s)
+  retryDefShort = lmacConfMib[21];
+  retryDefLong = lmacConfMib[20];
+  retryApply();
+  // Measure congestion on all channels at startup and choose the channel (about 12 s).
+  // After a restart caused by a stalled radio, keep the channel the clients are on
   uint32_t svT0 = millis();
   uint8_t prevCh = prefs.getUChar("ch", 0);
-  channelSurvey();
-  wifiChannel = channelChoose(prevCh);
-  if (wifiChannel != prevCh) prefs.putUChar("ch", wifiChannel);
-  esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
-  evlog("channel %d selected (previous %d), survey took %lu ms", wifiChannel, prevCh, (unsigned long)(millis() - svT0));
+  uint32_t tag = stallBootTag;
+  stallBootTag = 0;
+  uint8_t keepCh = tag & 0xFF;
+  if (esp_reset_reason() == ESP_RST_SW && (tag & ~0xFFu) == STALL_BOOT_MAGIC && keepCh >= 1 && keepCh <= 13) {
+    wifiChannel = keepCh;
+    esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+    memcpy(keptMac, stallBootMac, sizeof(keptMac));
+    keptAny = true;
+    evlog("restarted after a radio stall: keeping channel %d and the port numbers", wifiChannel);
+  } else {
+    channelSurvey();
+    wifiChannel = channelChoose(prevCh);
+    if (wifiChannel != prevCh) prefs.putUChar("ch", wifiChannel);
+    esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+    evlog("channel %d selected (previous %d), survey took %lu ms", wifiChannel, prevCh, (unsigned long)(millis() - svT0));
+  }
   esp_now_init();
   esp_now_register_recv_cb(onRecv);
   esp_now_register_send_cb(onSent);
@@ -1502,7 +1781,7 @@ static void loop() {
       Serial.printf("@%s err timeout\n", relayId);
       relayId[0] = 0;
     } else if (ms - relayLastSendMs >= RELAY_RESEND_MS) {  // no reply -> resend the same packet
-      esp_now_send(relayMac, relayBuf, relayLen);
+      enm_radio_send(relayMac, relayBuf, relayLen);
       relayLastSendMs = ms;
       relayResends++;
     }

@@ -41,7 +41,7 @@ examples/
 | Sending | send queue, batching, Note Off resend, dropping stale Note On | the same (PC → client); waits for USB writes |
 | Delivery | tells the bridge which MIDI channels it listens to | forwards messages from a client to the other clients listening to that channel |
 | Other | BLE-MIDI when no bridge is reachable; choosing the transport | fixed 8 USB-MIDI ports |
-| Recovery | detects a stuck radio driver and restarts it | the same |
+| Recovery | detects a stuck radio driver and restarts it. A driver that refuses every packet is reinitialized at once (about 1 s); if that does not help, or internal memory is low, the device restarts and comes back on the same channel and port numbers within a few seconds | detects a stuck radio driver and restarts it |
 | Duplicates | drops packets that arrive twice because of radio-layer retries | the same |
 | Diagnostics | radio round-trip measurement, statistics | PING replies, statistics, logging |
 
@@ -139,7 +139,7 @@ Open the port with DTR on (the C6 resets if the port is opened with DTR off; the
 | C6 | key `noteon_max_age_ms` | age after which a waiting Note On is dropped (0 = never; default 80) |
 | C6 | key `phy_rate` | radio rate (0=1M 1=6M 2=24M 3=MCS4; default 1) |
 | C6 | `reset` / `unpair` / `restart [auto\|ble]` | reset settings to defaults / erase registration and reboot / reboot |
-| both | `radio_restart [wifi\|stall]` | diagnostic: restart ESP-NOW. `wifi` = restart Wi-Fi as well, `stall` = simulate a stuck driver (the device should detect it and restart by itself) |
+| both | `radio_restart [wifi\|stall]` | diagnostic: restart ESP-NOW. `wifi` = restart Wi-Fi as well, `stall` = simulate a stuck driver (the device should detect it and restart by itself). The bridge also takes `driver` = reinitialize the Wi-Fi driver, and `stall hold` = a stuck driver that survives restarts (recovery escalates up to a device restart) |
 | bridge | keys `channel_min`, `channel_max` | range of radio channels that may be chosen (takes effect at the next survey) |
 | bridge | key `noteon_max_age_ms` | same as above, for the PC → client direction |
 | bridge | `ports` / `registry` / `survey` | connected ports (also shows per-port signal strength `rssi` and undelivered count `tx_fail`) / registered clients / latest radio channel survey |
@@ -147,7 +147,11 @@ Open the port with DTR on (the C6 resets if the port is opened with DTR off; the
 | bridge | `resurvey` / `switch_channel <n>` | survey the radio channels again and choose one (about 12 s) / move to the given radio channel |
 | bridge | `port <n> <command…>` | relay a command over the radio to the client on port n (e.g. `@5 port 2 set rx_channels omni`). Resent every 150 ms until a reply arrives; `err timeout` after 1.5 s |
 | bridge | key `tx_parallel` | 1 = hand packets to the radio in parallel, one per client (default; a hard-to-reach client holds up the others less); 0 = one packet at a time overall, for comparison. Not saved |
+| both | key `send_lock` | 1 = hand packets to the radio under the Wi-Fi driver's global lock (default). ESP-NOW otherwise adds frames to the driver's transmit queue without that lock, which can lose the queue and stall all sending until the driver is initialized again. 0 = without the lock, for comparison. Not saved |
 | bridge | keys `tx_fail_max`, `tx_probe` | diagnostic: number of consecutive failures before an unresponsive client is skipped (default 3); probe sends while skipped (1 = on; starts at 250 ms, doubling up to 1 s). Not saved |
+| bridge | key `trace_status` / `trace [clear]` | diagnostic: status byte of the messages to trace (e.g. 175 = Poly Aftertouch ch16), 0 = off (default). A traced message that the client sends back unchanged is timed from its arrival over USB until the reply has been written to USB (`total_us`), and until the reply arrived over the radio (`radio_us`). `trace` lists the 16 slowest with their port, data bytes (`key` = data1 + data2 × 128) and USB arrival time (`in_us`, bridge clock), slowest first, plus p50 / p99 / max. The tables (about 10 KB) are allocated only while tracing is on. Subtract `total_us` from the round trip measured on the PC to get the time spent on the PC and USB side. Not saved |
+| bridge | key `retry_limit` | how many times the radio retries a frame that is not acknowledged (default 8; 0 = the Wi-Fi library's value, 32). The radio sends the frames handed to it in order, so while it retries a frame to a far client, the frames to the other clients wait behind it; 8 shortens those waits (near clients' longest delays about 2.6 ms shorter with a client at about -87 dBm) at the cost of more lost packets to such a far client (about 0.6% instead of 0.08%; Note Offs are resent). `get retry_limit` also shows the values in use and the library's. Uses functions of the Wi-Fi library that are not in its public headers. Not saved |
+| bridge | key `slow_tx_ms` / `slowtx [clear]` | diagnostic: radio sends whose result (delivered or not) came this many ms or more after they were handed to the radio are recorded (default 10, 0 = off). `slowtx` lists the last 64, oldest first: port, `sent_us` (bridge clock, same as `in_us` of `trace`), `air_us`, `ok`, `resend` (Note Off resend packet), `timeout` (no result at all), `len`, `rssi`, `nomem` (running count of sends the radio refused). Not saved |
 | bridge | key `tx_impl` | diagnostic: 0 = single-queue send task, 1 = per-client send task (default). For comparing both inside one firmware. Not saved |
 
 Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port> "command" …`
@@ -166,6 +170,8 @@ Setup: `cd examples/pc && python3 -m venv .venv && .venv/bin/pip install -r requ
 | `latency_test.py` | `ping` / `burst` / `rxtest` / `notetest` / `looptest` / `systest` / `info` / `listen` / `list`. `--port` takes part of the port name (e.g. `"Port 1"`, `conESP32C6`) |
 | `multi_test.py` | checks with several clients connected at once (round trips, simultaneous sending, delivery between clients) |
 | `weak_test.py` | how one hard-to-reach client changes the latency of the other clients, per condition |
+| `trace_test.py` | split round trips into the part spent in the bridge and on the radio and the part spent on the PC side (uses the bridge's `trace_status`). Round trips are sent and timed by `mlping` by default; `--engine python` keeps the Python sender for comparison |
+| `mlping/mlping` | round trips to several ports through CoreMIDI from a real-time thread, one CSV line per ping, so that Python's thread scheduling is not part of the times (sender wake-up error and receive callback delay below 0.1 ms). `multi_test.py`, `soak_test.py`, `weak_test.py`, `dead_peer_test.py` and `trace_test.py` time their round trips with it (`MlPing` / `ping_ports` in `multi_test.py`); build it first. Build: `clang -O2 -o mlping/mlping mlping/mlping.c -framework CoreMIDI -framework CoreFoundation` |
 | `dead_peer_test.py` | how long sending to a client that stopped responding holds up the other clients |
 | `port_watch.py` | watch port release and rejoin |
 | `mlink_config.py` | send config commands |

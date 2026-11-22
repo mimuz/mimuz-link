@@ -8,6 +8,7 @@
  ver. history
 
  - 2026/11/19 : Start Writing
+ - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (send_lock)
 
 */
 // mimuz-link: communication layer for the client side (XIAO ESP32-C6, etc.)
@@ -144,7 +145,7 @@ static esp_err_t MLINK_HOT enmSendRaw(const uint8_t *buf, size_t len) {
   txStart[h & 63] = now_us();
   txHead = h + 1;
   portEXIT_CRITICAL(&txMux);
-  esp_err_t e = esp_now_send(peerMac, buf, len);
+  esp_err_t e = enm_radio_send(peerMac, buf, len);
   if (e != ESP_OK) {
     // Not queued for sending -> no callback will come, so undo the entry (simple handling that assumes no other send happens in between)
     portENTER_CRITICAL(&txMux);
@@ -182,6 +183,7 @@ static uint8_t stallChannel();
 // Restart ESP-NOW (and Wi-Fi too if withWifi = true). Restores the link to the bridge (peer registration, rate, channel)
 static void radioRestart(bool withWifi) {
   Serial.println(withWifi ? "radio stalled again: restarting Wi-Fi and ESP-NOW" : "radio stalled: restarting ESP-NOW");
+  enm_radio_block();
   esp_now_deinit();
   if (withWifi) {
     esp_wifi_stop();
@@ -193,6 +195,7 @@ static void radioRestart(bool withWifi) {
   esp_now_init();
   esp_now_register_send_cb(onSent);
   esp_now_register_recv_cb(onRecv);
+  enm_radio_unblock();
   if (paired) {
     esp_now_peer_info_t pi = {};
     memcpy(pi.peer_addr, peerMac, 6);
@@ -473,8 +476,10 @@ static void espnowInit() {
   if (esp_now_init() != ESP_OK) Serial.println("esp_now_init failed");
   esp_now_register_send_cb(onSent);
   esp_now_register_recv_cb(onRecv);
+  enm_radio_unblock();
 }
 static void espnowStop() {
+  enm_radio_block();
   esp_now_deinit();
   WiFi.mode(WIFI_OFF);
   paired = false;
@@ -523,7 +528,7 @@ static bool pairScan() {
       enm_init(p, PKT_PAIR_REQ);
       for (int k = 0; k < 2; k++) {
         p.t_us = now_us();
-        esp_now_send(BCAST, (const uint8_t *)&p, sizeof(p));
+        enm_radio_send(BCAST, (const uint8_t *)&p, sizeof(p));
         delay(15);
       }
       if (waitReply(PKT_PAIR_ACK, PKT_PAIR_ACK, 100)) {
@@ -1008,6 +1013,7 @@ static void cmdExec(const Cmd &c, Print &o) {
     } else if (!strcmp(c.argv[1], "rx_channels")) o.printf("@%s ok rx_channels=0x%04X\n", c.id, rxChMask);
     else if (!strcmp(c.argv[1], "noteon_max_age_ms")) o.printf("@%s ok noteon_max_age_ms=%u\n", c.id, noteOnMaxAgeMs);
     else if (!strcmp(c.argv[1], "phy_rate")) o.printf("@%s ok phy_rate=%u\n", c.id, rateIdx);
+    else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
     else cmdErr(c, o, "unknown_key");
   } else if (cmdIs(c, "set")) {
     uint32_t v;
@@ -1025,6 +1031,10 @@ static void cmdExec(const Cmd &c, Print &o) {
       setNoteOnMaxAgeMs((uint16_t)v);
       saveSettings();
       o.printf("@%s ok noteon_max_age_ms=%u\n", c.id, noteOnMaxAgeMs);
+    } else if (!strcmp(c.argv[1], "send_lock")) {  // diagnostic: 1 = hand packets to the radio under the driver's lock (not saved)
+      if (!cmdUint(c.argv[2], v)) { cmdErr(c, o, "bad_value"); return; }
+      enmSendLock = v != 0;
+      o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
     } else if (!strcmp(c.argv[1], "phy_rate")) {
       if (!cmdUint(c.argv[2], v) || v >= ENM_RATE_NUM) { cmdErr(c, o, "bad_value"); return; }
       setRate((uint8_t)v);

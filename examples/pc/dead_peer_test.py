@@ -8,6 +8,7 @@
 #  ver. history
 #
 #  - 2026/11/19 : Start Writing
+#  - 2026/11/22 : Time round trips with mlping (C, CoreMIDI) instead of a Python thread
 #
 """Measure how much sending to an unresponsive client delays the other clients (serial vs. parallel TX).
 
@@ -20,9 +21,9 @@ One trial:
   4. Bring the victim back with `restart auto`.
 Serial (tx_parallel=0) and parallel (tx_parallel=1) are alternated.
 """
-import argparse, threading, time
+import argparse, time
 import serial
-from multi_test import Port, PING, pct
+from multi_test import Port, MlPing, pct
 
 ap = argparse.ArgumentParser()
 ap.add_argument("bridge")
@@ -78,34 +79,20 @@ for t in range(a.trials * 2):
     for kv in (a.setB if mode else a.setA).split(";"):
         bcmd(f"set {kv.strip()}")
     # Before the victim leaves (baseline for comparison): 1.5 s
-    samples, stop = [], threading.Event()
-
-    def pinger():
-        n = 0
-        while not stop.is_set():
-            O.ev.clear()
-            O.want = n & 0x3FFF
-            t0 = time.perf_counter()
-            O.mo.send_message([PING, O.want & 0x7F, O.want >> 7])
-            n += 1
-            samples.append((t0, (O.t / 1e9 - t0) * 1000 if O.ev.wait(0.3) else None))
-            time.sleep(0.001)
-
-    th = threading.Thread(target=pinger)
-    th.start()
-    time.sleep(1.5)
-    tb = time.perf_counter()
+    now = lambda: time.clock_gettime_ns(time.CLOCK_UPTIME_RAW) / 1e9  # the clock mlping uses
+    pinger = MlPing("bridgeESPS3", [a.other], gmin=1, gmax=1, timeout=0.3)
+    time.sleep(1.7)  # mlping takes about 0.2 s to start
+    tb = now()
     f0, _ = victim_info()
     vcmd("restart ble")
     time.sleep(0.4)  # wait for the restart to begin
-    t1 = time.perf_counter()
+    t1 = now()
     for i in range(300):  # every 5 ms for 1.5 s
         V.mo.send_message([0xB0, 1, i & 0x7F])
         time.sleep(0.005)
-    t2 = time.perf_counter()
+    t2 = now()
     time.sleep(0.2)
-    stop.set()
-    th.join()
+    samples = [(snd / 1e9, (ts - snd) / 1e6 if ts else None) for _, snd, ts, _, _ in pinger.stop().rec[a.other]]
     f1, idle = victim_info()
     vcmd("restart auto")
     bfr = [r for (ts, r) in samples if ts < tb and r is not None]

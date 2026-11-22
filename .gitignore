@@ -166,3 +166,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Build output
+examples/pc/mlping/mlping
+examples/*/*/build/

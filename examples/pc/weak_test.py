@@ -8,6 +8,7 @@
 #  ver. history
 #
 #  - 2026/11/19 : Start Writing
+#  - 2026/11/22 : Time round trips with mlping (C, CoreMIDI) instead of Python threads
 #
 """Measure, cause by cause, how the latency of the other clients changes when one client has a weak link.
 
@@ -22,7 +23,7 @@ For each PHY rate of the weak client (--rates), a to d are repeated in order, --
 """
 import argparse, random, threading, time
 import serial
-from multi_test import Port, CTRL, pct
+from multi_test import Port, CTRL, MlPing, pct, ping_ports
 
 ap = argparse.ArgumentParser()
 ap.add_argument("bridge")
@@ -82,6 +83,7 @@ def run(rate, cond):
 
     def load():
         k = 0
+        wp = MlPing("bridgeESPS3", [a.weak], gmin=4, gmax=6, timeout=0.2) if cond == "d" else None
         while not stop.is_set():
             if cond == "b":
                 W.mo.send_message([0xB0, 1, k & 0x7F])  # a message the C6 application ignores
@@ -94,20 +96,17 @@ def run(rate, cond):
                 W.mo.send_message([CTRL, 119, 5])    # every 5 ms (5 s worth; re-issued before it runs out)
                 r["wsent"] += 1000
                 stop.wait(4.9)
-            elif cond == "d":
-                rt, lost = W.ping(50, 4, 6, 0.2)
-                r["wrtt"] += rt
-                r["wlost"] += lost
             else:
                 stop.wait(0.2)
+        if wp:
+            rt, lost = wp.stop().result(a.weak)
+            r["wrtt"] += rt
+            r["wlost"] += lost
 
     th = threading.Thread(target=load)
     th.start()
     time.sleep(0.3)
-    out = {}
-    ths = [threading.Thread(target=lambda p=p: out.__setitem__(p.n, p.ping(a.pings, 5, 10, 0.2))) for p in O]
-    [t.start() for t in ths]
-    [t.join() for t in ths]
+    out = ping_ports("bridgeESPS3", [p.n for p in O], count=a.pings, gmin=5, gmax=10, timeout=0.2)
     stop.set()
     th.join()
     if cond == "c":

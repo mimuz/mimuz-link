@@ -9,6 +9,7 @@
 #
 #  - 2026/11/19 : Start Writing
 #  - 2026/11/21 : Add --only-b (run only the simultaneous round-trip test)
+#  - 2026/11/22 : Time round trips with mlping (C, CoreMIDI) instead of Python threads; add MlPing / ping_ports for the other tools
 #
 """Checks with several clients (C6) connected at the same time.
 
@@ -19,7 +20,7 @@ usage: multi_test.py [--ports 1,2,3] [--name bridgeESPS3]
   D. Delivery between clients (receive channels), and check that messages from the PC are not relayed
   E. Delivery of messages without a channel
 """
-import argparse, random, threading, time
+import argparse, os, signal, subprocess, threading, time
 import rtmidi
 
 PING, CTRL = 0xAF, 0xBF
@@ -35,8 +36,57 @@ def stat(xs):
     return f"n={len(xs)} p50={pct(xs, .5):.2f} p95={pct(xs, .95):.2f} p99={pct(xs, .99):.2f} max={max(xs):.2f}ms" if xs else "no data"
 
 
+MLPING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mlping", "mlping")
+
+
+class MlPing:
+    """Round trips timed by mlping (mlping/mlping.c: CoreMIDI, real-time sender thread), so that Python's thread scheduling is
+    not part of the times. Every port given keeps one ping out and waits a random gap (gmin..gmax ms) after each reply.
+    It runs in the background from the constructor until secs have passed, count pings were sent on every port (0 = no
+    limit), or stop() is called. Round trips are measured up to the CoreMIDI time stamp of the reply.
+    Times in rec are ns of the host clock, the same as time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)."""
+
+    def __init__(self, name, nums, secs=0, count=0, gmin=5, gmax=10, timeout=0.2):
+        if not os.path.exists(MLPING):
+            raise SystemExit(f"build {MLPING} first (see mlping/mlping.c)")
+        self.nums = [int(n) for n in nums]
+        self.rec = {}
+        self.pr = subprocess.Popen([MLPING, name, ",".join(map(str, self.nums)), str(secs if secs > 0 else 86400), str(gmin),
+                                    str(gmax), str(timeout * 1000), str(PING), str(count)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def stop(self):
+        if self.pr.poll() is None:
+            self.pr.send_signal(signal.SIGINT)
+        return self.wait()
+
+    def wait(self):
+        """Waits for the end and reads the results: rec = {port: [(key, send_ns, recv_ts_ns, recv_cb_ns, late_ns), ...]}
+        (recv 0 = lost). Raises RuntimeError if mlping failed (e.g. a port is not there)."""
+        out, err = self.pr.communicate()
+        if self.pr.returncode != 0:
+            raise RuntimeError(f"mlping failed: {err.strip()}")
+        self.rec = {n: [] for n in self.nums}
+        for ln in out.splitlines()[1:]:
+            n, *v = map(int, ln.split(","))
+            self.rec[n].append(tuple(v))
+        return self
+
+    def result(self, n):
+        """(round trips in ms, number lost) of port n."""
+        r = self.rec.get(n, [])
+        return [(ts - s) / 1e6 for _, s, ts, _, _ in r if ts], sum(1 for x in r if not x[2])
+
+
+def ping_ports(name, nums, **kw):
+    """Round trips on several ports at the same time (see MlPing); returns {port: (round trips in ms, number lost)}."""
+    m = MlPing(name, nums, **kw).wait()
+    return {n: m.result(n) for n in m.nums}
+
+
 class Port:
     def __init__(self, name, n):
+        self.name = name
         self.n = n
         self.mi, self.mo = rtmidi.MidiIn(), rtmidi.MidiOut()
         self.mi.ignore_types(sysex=True, timing=False, active_sense=False)
@@ -90,18 +140,8 @@ class Port:
         time.sleep(wait)
 
     def ping(self, count, gmin=5, gmax=10, timeout=0.5):
-        rtts, lost = [], 0
-        for i in range(count):
-            self.ev.clear()
-            self.want = i & 0x3FFF
-            t0 = time.perf_counter_ns()
-            self.mo.send_message([PING, self.want & 0x7F, self.want >> 7])
-            if self.ev.wait(timeout):
-                rtts.append((self.t - t0) / 1e6)
-            else:
-                lost += 1
-            time.sleep(random.uniform(gmin, gmax) / 1000)
-        return rtts, lost
+        """count round trips on this port alone (timed by mlping); returns (round trips in ms, number lost)."""
+        return ping_ports(self.name, [self.n], count=count, gmin=gmin, gmax=gmax, timeout=timeout)[self.n]
 
     def query(self):
         """Number of Note On / Off messages the client received, and the number of notes still held."""
@@ -146,9 +186,7 @@ def main():
     clean()
     if a.only_b:
         print(f"== B. 全ポート同時の往復（各 {a.pings} 回、5〜10ms 間隔）")
-        res = {}
-        ths = [threading.Thread(target=lambda p=p: res.__setitem__(p.n, p.ping(a.pings))) for p in P]
-        [t.start() for t in ths]; [t.join() for t in ths]
+        res = ping_ports(a.name, [p.n for p in P], count=a.pings, timeout=0.5)
         for p in P:
             r, lost = res[p.n]
             verdict(f"Port {p.n}", lost == 0, f"{stat(r)} 取りこぼし={lost}")
@@ -163,9 +201,7 @@ def main():
         verdict(f"Port {p.n}", lost == 0 and leak == 0, f"{stat(r)} 取りこぼし={lost} ほかのポートへの漏れ={leak}")
 
     print(f"== B. 全ポート同時の往復（各 {a.pings} 回、5〜10ms 間隔）")
-    res = {}
-    ths = [threading.Thread(target=lambda p=p: res.__setitem__(p.n, p.ping(a.pings))) for p in P]
-    [t.start() for t in ths]; [t.join() for t in ths]
+    res = ping_ports(a.name, [p.n for p in P], count=a.pings, timeout=0.5)
     for p in P:
         r, lost = res[p.n]
         verdict(f"Port {p.n}", lost == 0, f"{stat(r)} 取りこぼし={lost}")
