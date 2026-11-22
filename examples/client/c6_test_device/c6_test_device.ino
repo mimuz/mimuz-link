@@ -9,6 +9,8 @@
 
  - 2026/11/19 : Start Writing
  - 2026/11/20 : Remove the switch input (runs on a bare board)
+ - 2026/11/22 : Build without the scan task with -DTEST_WORKLOAD=0 (for comparing with other libraries)
+ - 2026/11/22 : -DTEST_TASK_PRIO=n sets the priorities of the mimuz-link send and receive tasks (for comparison)
 
 */
 // Test device (application): bare XIAO ESP32-C6 (no external wiring)
@@ -186,12 +188,21 @@ void setup() {
   delay(1500);  // wait for USB CDC to connect (so the log can be read)
   // To erase the registration and pair again, use the serial command u (or the config command unpair)
   mlink::Config cfg;
+#ifdef TEST_TASK_PRIO
+  cfg.txTaskPriority = TEST_TASK_PRIO;  // for comparison: e.g. above the scan task (12)
+  cfg.rxTaskPriority = TEST_TASK_PRIO;
+#endif
 
   mlink::onMidi(onMidi);
   mlink::onMidiFast(onMidiFast);
   mlink::Transport tr = mlink::begin(cfg);
 
+#ifndef TEST_WORKLOAD
+#define TEST_WORKLOAD 1
+#endif
+#if TEST_WORKLOAD
   wl::begin(appSend, 12);  // scan task priority 12 (above the mimuz-link send task at 11)
+#endif
   Serial.printf("ready (%s). commands: p P s c r0..r3  b=BLE e=auto u=re-pair\n", tr == mlink::TR_BLE ? "BLE-MIDI" : "ESP-NOW");
 }
 

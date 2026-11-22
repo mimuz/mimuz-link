@@ -10,6 +10,7 @@
  - 2026/11/19 : Start Writing
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (send_lock)
  - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit)
+ - 2026/11/22 : The BLE-MIDI send task takes its priority from Config::txTaskPriority like the ESP-NOW one (was fixed at 9)
 
 */
 // mimuz-link: communication layer for the client side (XIAO ESP32-C6, etc.)
@@ -64,7 +65,7 @@ enum BootRequest { BOOT_AUTO, BOOT_BLE, BOOT_REPAIR };  // passed to restart(): 
 struct Config {
   const char *namePrefix = "mi:muz:conESP32C6";  // device name = prefix + "-" + unique ID (11 chars)
   bool repair = false;                           // true: erase the registration and pair again (e.g. booted with a switch held down)
-  uint8_t txTaskPriority = 11;                   // priority of the send task
+  uint8_t txTaskPriority = 11;                   // priority of the send task (ESP-NOW and BLE-MIDI)
   uint8_t rxTaskPriority = 10;                   // priority of the task that hands received MIDI to the app
 };
 
@@ -1113,7 +1114,7 @@ static Transport begin(const Config &cfg) {
   if (mode == MODE_ESPNOW) xTaskCreate(c6TxTask, "mlink_tx", 4096, NULL, cfg.txTaskPriority, &c6TxTaskH);
   xTaskCreate(evTask, "mlink_rx", 4096, NULL, cfg.rxTaskPriority, &evTaskH);
   if (mode == MODE_ESPNOW) xTaskCreate(pingTask, "mlink_ping", 4096, NULL, 9, &pingTaskH);
-  else xTaskCreate(bleTxTask, "mlink_ble", 4096, NULL, 9, &bleTxTaskH);
+  else xTaskCreate(bleTxTask, "mlink_ble", 4096, NULL, cfg.txTaskPriority, &bleTxTaskH);
   return transport();
 }
 
