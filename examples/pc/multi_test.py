@@ -10,6 +10,7 @@
 #  - 2026/11/19 : Start Writing
 #  - 2026/11/21 : Add --only-b (run only the simultaneous round-trip test)
 #  - 2026/11/22 : Time round trips with mlping (C, CoreMIDI) instead of Python threads; add MlPing / ping_ports for the other tools
+#  - 2026/11/22 : MlPing channel mode (one MIDI port shared by all clients, told apart by MIDI channel)
 #
 """Checks with several clients (C6) connected at the same time.
 
@@ -44,15 +45,16 @@ class MlPing:
     not part of the times. Every port given keeps one ping out and waits a random gap (gmin..gmax ms) after each reply.
     It runs in the background from the constructor until secs have passed, count pings were sent on every port (0 = no
     limit), or stop() is called. Round trips are measured up to the CoreMIDI time stamp of the reply.
-    Times in rec are ns of the host clock, the same as time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)."""
+    Times in rec are ns of the host clock, the same as time.clock_gettime_ns(time.CLOCK_UPTIME_RAW).
+    channels=True: nums are MIDI channels on one port shared by all clients (see mlping.c, channel mode)."""
 
-    def __init__(self, name, nums, secs=0, count=0, gmin=5, gmax=10, timeout=0.2):
+    def __init__(self, name, nums, secs=0, count=0, gmin=5, gmax=10, timeout=0.2, channels=False):
         if not os.path.exists(MLPING):
             raise SystemExit(f"build {MLPING} first (see mlping/mlping.c)")
         self.nums = [int(n) for n in nums]
         self.rec = {}
         self.pr = subprocess.Popen([MLPING, name, ",".join(map(str, self.nums)), str(secs if secs > 0 else 86400), str(gmin),
-                                    str(gmax), str(timeout * 1000), str(PING), str(count)],
+                                    str(gmax), str(timeout * 1000), str(PING), str(count)] + (["ch"] if channels else []),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def stop(self):

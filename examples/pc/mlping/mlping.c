@@ -9,6 +9,7 @@
 
  - 2026/11/22 : Start Writing
  - 2026/11/22 : Stop after a given number of pings per port, or when interrupted (SIGINT / SIGTERM)
+ - 2026/11/22 : Channel mode: all targets on one MIDI port, told apart by the MIDI channel of the ping
 
 */
 // Sends numbered pings (status byte, then the number as two 7-bit data bytes) to each given port of a MIDI device and
@@ -29,7 +30,12 @@
 // It stops after <seconds>, after <count> pings on every port (0 = no limit), or on SIGINT / SIGTERM; in every case it
 // waits for the pings that are out and then prints the results.
 //
-// usage: mlping <device name part> <ports e.g. 1,2,3> <seconds> [gap_min_ms gap_max_ms [timeout_ms [status [count]]]]
+// Channel mode (mode = ch): for a device with one MIDI port shared by all its clients, the numbers given are MIDI
+// channels instead of ports. All pings go to the first port whose name contains the name part; the ping to channel n
+// is Poly Aftertouch on channel n (status 0xA0 + n - 1, the status argument is ignored), and the client that listens
+// on that channel is expected to send it back unchanged.
+//
+// usage: mlping <device name part> <ports e.g. 1,2,3> <seconds> [gap_min_ms gap_max_ms [timeout_ms [status [count [mode]]]]]
 //
 // build: clang -O2 -o mlping mlping.c -framework CoreMIDI -framework CoreFoundation
 
@@ -54,7 +60,8 @@ typedef struct {
 } Ping;
 
 typedef struct {
-  int num;                     // port number as the OS names it (1..8)
+  int num;                     // port number as the OS names it (1..8), or the MIDI channel in channel mode
+  uint8_t st;                  // status byte of the pings
   MIDIEndpointRef src, dst;
   Ping *pings;
   int n;                       // pings sent
@@ -76,13 +83,20 @@ static void onSignal(int sig) { (void)sig; stopNow = 1; }
 static uint64_t ns2abs(uint64_t ns) { return ns * tb.denom / tb.numer; }
 static uint64_t abs2ns(uint64_t a) { return a * tb.numer / tb.denom; }
 
+// srcRef: the port in port mode, NULL in channel mode (the status byte then tells the target)
 static void readProc(const MIDIPacketList *pl, void *readRef, void *srcRef) {
   uint64_t now = mach_absolute_time();
-  Port *p = (Port *)srcRef;
   const MIDIPacket *pk = &pl->packet[0];
   for (UInt32 i = 0; i < pl->numPackets; i++) {
     for (UInt16 j = 0; j + 2 < pk->length; j++) {
-      if (pk->data[j] != status) continue;
+      Port *p = (Port *)srcRef;
+      if (p) {
+        if (pk->data[j] != p->st) continue;
+      } else {
+        for (int k = 0; k < nPorts && !p; k++)
+          if (ports[k].st == pk->data[j]) p = &ports[k];
+        if (!p) continue;
+      }
       int key = pk->data[j + 1] | (pk->data[j + 2] << 7);
       if (key == atomic_load(&p->want) && !atomic_load(&p->got)) {
         atomic_store(&p->gotTs, pk->timeStamp ? pk->timeStamp : now);
@@ -100,7 +114,9 @@ static int nameMatches(MIDIEndpointRef e, const char *part, int num) {
   if (MIDIObjectGetStringProperty(e, kMIDIPropertyDisplayName, &s) != noErr || !s) return 0;
   char buf[256];
   int ok = 0;
-  if (CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+  if (num <= 0) {  // any port whose name contains part
+    ok = CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8) && strcasestr(buf, part);
+  } else if (CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8)) {
     char tail[16];
     snprintf(tail, sizeof(tail), "Port %d", num);
     size_t L = strlen(buf), T = strlen(tail);
@@ -130,7 +146,7 @@ static uint64_t gapAbs(double gmin, double gmax) {
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    fprintf(stderr, "usage: mlping <device name part> <ports e.g. 1,2,3> <seconds> [gap_min_ms gap_max_ms [timeout_ms [status [count]]]]\n");
+    fprintf(stderr, "usage: mlping <device name part> <ports e.g. 1,2,3> <seconds> [gap_min_ms gap_max_ms [timeout_ms [status [count [mode]]]]]\n");
     return 2;
   }
   const char *part = argv[1];
@@ -140,6 +156,7 @@ int main(int argc, char **argv) {
   if (argc > 7) status = (uint8_t)strtol(argv[7], NULL, 0);
   int count = argc > 8 ? atoi(argv[8]) : 0;
   if (count <= 0 || count > MAX_PINGS) count = MAX_PINGS;
+  int chMode = argc > 9 && !strcmp(argv[9], "ch");
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = onSignal;
@@ -158,14 +175,18 @@ int main(int argc, char **argv) {
   for (char *t = strtok(list, ","); t && nPorts < MAX_PORTS; t = strtok(NULL, ",")) {
     Port *p = &ports[nPorts];
     p->num = atoi(t);
-    for (ItemCount i = 0; i < MIDIGetNumberOfSources(); i++)
-      if (nameMatches(MIDIGetSource(i), part, p->num)) p->src = MIDIGetSource(i);
-    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); i++)
-      if (nameMatches(MIDIGetDestination(i), part, p->num)) p->dst = MIDIGetDestination(i);
+    if (chMode && (p->num < 1 || p->num > 16)) { fprintf(stderr, "mlping: channel %d out of range\n", p->num); return 1; }
+    p->st = chMode ? (uint8_t)(0xA0 + p->num - 1) : status;
+    int match = chMode ? 0 : p->num;
+    for (ItemCount i = 0; i < MIDIGetNumberOfSources() && !p->src; i++)
+      if (nameMatches(MIDIGetSource(i), part, match)) p->src = MIDIGetSource(i);
+    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations() && !p->dst; i++)
+      if (nameMatches(MIDIGetDestination(i), part, match)) p->dst = MIDIGetDestination(i);
     if (!p->src || !p->dst) { fprintf(stderr, "mlping: port %d of '%s' not found\n", p->num, part); return 1; }
     p->pings = calloc(MAX_PINGS, sizeof(Ping));
     atomic_store(&p->want, -1);
-    MIDIPortConnectSource(in, p->src, p);
+    if (!chMode) MIDIPortConnectSource(in, p->src, p);
+    else if (nPorts == 0) MIDIPortConnectSource(in, p->src, NULL);
     nPorts++;
   }
 
@@ -204,7 +225,7 @@ int main(int argc, char **argv) {
       Byte buf[64];
       MIDIPacketList *pl = (MIDIPacketList *)buf;
       MIDIPacket *pk = MIDIPacketListInit(pl);
-      Byte m[3] = {status, (Byte)(g->key & 0x7F), (Byte)(g->key >> 7)};
+      Byte m[3] = {p->st, (Byte)(g->key & 0x7F), (Byte)(g->key >> 7)};
       g->send = mach_absolute_time();
       pk = MIDIPacketListAdd(pl, sizeof(buf), pk, 0, 3, m);
       MIDISend(out, p->dst, pl);
