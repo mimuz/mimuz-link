@@ -10,6 +10,7 @@
  - 2026/11/19 : Start Writing
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (enm_radio_send)
  - 2026/11/22 : Set the radio retry limit (enm_retry_set)
+ - 2026/11/22 : Client label (PKT_LABEL)
 
 */
 // mimuz-link: protocol definitions (shared by client and bridge)
@@ -55,6 +56,28 @@
 //   The client executes the command and returns a single reply line with PKT_CMD_REPLY.
 //   Both consist of the 12-byte header (4th byte = character count) followed by the string (not terminated).
 #define ENM_CMD_TEXT_MAX 180
+// Client label:
+//   A name the user gives a client (saved on the client), to tell clients apart in the bridge's port list.
+//   Up to ENM_LABEL_MAX characters of letters, digits and "-_." (no spaces, so it fits the key=value replies).
+//   It is not used as the USB or BLE device name. Applications can tell clients apart by either: the label (free,
+//   several clients may share one on purpose) or the device name (unique, like an ID; "<prefix>-<unique ID>").
+//   An ESP-NOW client's device name shows nowhere else on the PC, so it travels with the label.
+//   The client sends PKT_LABEL after every connect and whenever the label changes: the 12-byte header (4th byte =
+//   label length), the label (not terminated; 0 characters = none), then 1 byte = device name length and the device
+//   name (not terminated, up to ENM_DEVNAME_MAX). Bridges that do not know PKT_LABEL ignore it.
+//   The bridge can also ask for it with PKT_LABEL_REQ; the client then sends PKT_LABEL. The bridge asks by itself
+//   when it has not received a label some time after a client connected, and on the "label_request" command.
+#define ENM_LABEL_MAX 30
+#define ENM_DEVNAME_MAX 31
+static inline bool enm_label_valid(const char *s) {
+  size_t n = 0;
+  for (; s[n]; n++) {
+    char c = s[n];
+    if (n >= ENM_LABEL_MAX) return false;
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) return false;
+  }
+  return true;
+}
 // Distribution by receive channel:
 //   The bridge is treated as "one MIDI cable that everyone is connected to". Each receiving C6 announces which MIDI channels it listens to.
 //   - The C6 sends its listen-channel mask on every connect (CONNECT seq) and whenever it changes (PKT_SUBSCRIBE aux).
@@ -126,6 +149,8 @@ enum : uint8_t {
   PKT_SUBSCRIBE = 18,  // C6 -> S3        : aux = listen-channel mask (16 bit), len = flags (ENM_SUB_*)
   PKT_CMD = 19,        // S3 -> C6        : relayed config command (one line of text)
   PKT_CMD_REPLY = 20,  // C6 -> S3        : its reply (one line of text)
+  PKT_LABEL = 21,      // C6 -> S3        : the client's label and device name (see "Client label")
+  PKT_LABEL_REQ = 22,  // S3 -> C6        : asks the client to send its label (PKT_LABEL)
 };
 
 typedef struct __attribute__((packed)) {

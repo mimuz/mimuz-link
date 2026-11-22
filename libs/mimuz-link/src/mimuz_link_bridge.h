@@ -16,6 +16,8 @@
  - 2026/11/22 : Trace how long marked messages spend in the bridge and on the radio (trace_status, trace)
  - 2026/11/22 : Record radio sends whose result came late (slow_tx_ms, slowtx)
  - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit, 8 by default)
+ - 2026/11/22 : Show the label and device name each client tells (PKT_LABEL) in the port list
+ - 2026/11/22 : Keep the last label and device name of each registered client with the registration
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -166,6 +168,13 @@ static void evlog(const char *fmt, ...) {
 #define REG_MAX 64  // when exceeded, the oldest entry is overwritten
 static Preferences prefs;
 static uint8_t regMac[REG_MAX][6];
+// Last label and device name each registered client told (PKT_LABEL), kept with the registration so that clients
+// that are not connected can still be told apart in the registry list (about 4 KB for REG_MAX entries)
+struct RegMeta {
+  char label[ENM_LABEL_MAX + 1];
+  char name[ENM_DEVNAME_MAX + 1];
+};
+static RegMeta regMeta[REG_MAX];
 static uint8_t regCount = 0, regNext = 0;
 static volatile bool regDirty = false;
 
@@ -179,6 +188,7 @@ static void regAdd(const uint8_t *mac) {
   int idx = regCount < REG_MAX ? regCount++ : regNext;
   regNext = (idx + 1) % REG_MAX;
   memcpy(regMac[idx], mac, 6);
+  memset(&regMeta[idx], 0, sizeof(RegMeta));
   regDirty = true;  // saved in loop() (do not write non-volatile memory inside the receive callback)
 }
 static void regLoad() {
@@ -186,12 +196,32 @@ static void regLoad() {
   regNext = prefs.getUChar("next", 0);
   if (regCount > REG_MAX) regCount = 0;
   if (regCount) prefs.getBytes("mac", regMac, regCount * 6);
+  memset(regMeta, 0, sizeof(regMeta));
+  if (regCount && prefs.getBytesLength("meta") == regCount * sizeof(RegMeta)) prefs.getBytes("meta", regMeta, regCount * sizeof(RegMeta));
+  for (int i = 0; i < regCount; i++) {  // keep them terminated whatever was stored
+    regMeta[i].label[ENM_LABEL_MAX] = 0;
+    regMeta[i].name[ENM_DEVNAME_MAX] = 0;
+  }
+}
+// Remember what a registered client told about itself; saved in loop() when it changed
+static void regSetMeta(const uint8_t *mac, const char *label, const char *name) {
+  int r = regFind(mac);
+  if (r < 0) return;
+  if (!strcmp(regMeta[r].label, label) && (!name || !strcmp(regMeta[r].name, name))) return;
+  strlcpy(regMeta[r].label, label, sizeof(regMeta[r].label));
+  if (name) strlcpy(regMeta[r].name, name, sizeof(regMeta[r].name));
+  regDirty = true;
 }
 static void regSave() {
   prefs.putUChar("n", regCount);
   prefs.putUChar("next", regNext);
-  if (regCount) prefs.putBytes("mac", regMac, regCount * 6);
-  else prefs.remove("mac");
+  if (regCount) {
+    prefs.putBytes("mac", regMac, regCount * 6);
+    prefs.putBytes("meta", regMeta, regCount * sizeof(RegMeta));
+  } else {
+    prefs.remove("mac");
+    prefs.remove("meta");
+  }
 }
 
 // ---- Ports (assigned to connected C6 units, lowest free first) ----
@@ -208,6 +238,11 @@ struct Port {
   volatile uint32_t txFailCnt;  // packets to this client not delivered even after radio-layer retries
   volatile uint16_t rxChMask;   // MIDI channels this C6 listens to (bit0 = ch1; 0 = none)
   volatile uint8_t subFlags;    // ENM_SUB_SELF = also receive its own messages (for testing)
+  char label[ENM_LABEL_MAX + 1];  // the client's label (PKT_LABEL), empty until it tells it
+  char devName[ENM_DEVNAME_MAX + 1];  // the client's device name (PKT_LABEL), empty until it tells it
+  bool labelKnown;                // a PKT_LABEL arrived on this connection (an empty label counts too)
+  uint32_t labelReqMs;            // when the label was last asked for (PKT_LABEL_REQ)
+  uint8_t labelReqN;              // times asked on this connection
   uint16_t rxLastSeq;           // last sequence number received so far (to detect duplicate resends)
   bool rxHaveSeq;
   uint16_t rxPktSeq;            // sequence number, send time and count of the previous packet (to detect duplicates from radio-layer retries)
@@ -260,6 +295,11 @@ static int portAssign(const uint8_t *mac, uint8_t rate) {
     ports[i].failStreak = 0;
     ports[i].rxChMask = 0;
     ports[i].subFlags = 0;
+    ports[i].label[0] = 0;
+    ports[i].devName[0] = 0;
+    ports[i].labelKnown = false;
+    ports[i].labelReqMs = millis();
+    ports[i].labelReqN = 0;
     ports[i].rxHaveSeq = false;
     ports[i].rxPktCnt = 0;
     ports[i].txFailCnt = 0;
@@ -602,6 +642,30 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
       ports[i].subFlags = p.len;
       evlog("port %d receive channels: mask=0x%04X flags=%u", i + 1, p.aux, p.len);
       break;
+    case PKT_LABEL: {
+      uint8_t len = d[3];
+      char buf[ENM_LABEL_MAX + 1];
+      if (len > ENM_LABEL_MAX || n < ENM_HDR_LEN + len) break;
+      memcpy(buf, d + ENM_HDR_LEN, len);
+      buf[len] = 0;
+      if (!enm_label_valid(buf)) break;
+      if (strcmp(buf, ports[i].label)) evlog("port %d label: %s", i + 1, len ? buf : "(none)");
+      strlcpy(ports[i].label, buf, sizeof(ports[i].label));
+      if (n > ENM_HDR_LEN + len) {  // device name (absent from older clients)
+        uint8_t dn = d[ENM_HDR_LEN + len];
+        if (dn <= ENM_DEVNAME_MAX && n >= ENM_HDR_LEN + len + 1 + dn) {
+          char nm[ENM_DEVNAME_MAX + 1];
+          memcpy(nm, d + ENM_HDR_LEN + len + 1, dn);
+          nm[dn] = 0;
+          for (uint8_t k = 0; k < dn; k++)
+            if (nm[k] <= ' ' || nm[k] > '~') nm[k] = '_';  // keep the key=value replies intact
+          strlcpy(ports[i].devName, nm, sizeof(ports[i].devName));
+        }
+      }
+      regSetMeta(src, ports[i].label, ports[i].devName[0] ? ports[i].devName : nullptr);
+      ports[i].labelKnown = true;
+      break;
+    }
     case PKT_CFG:
       if (p.aux < ENM_RATE_NUM) {
         ports[i].rate = p.aux;
@@ -749,6 +813,8 @@ struct PTx {
 };
 static PTx ptx[NUM_PORTS];
 static void ptxAbortInflight();
+#define LABEL_REQ_GAP_MS 2000  // ask a client for its label this long after it connected (or after the last ask)
+#define LABEL_REQ_MAX 5        // and at most this many times per connection
 
 // ---- Radio retry limit (see enm_retry_set) ----
 // The library's limit is 32. With 8, the longest delays of near clients while a far client (about -87 dBm) does not
@@ -1391,8 +1457,8 @@ static void printList(Print &o) {
   }
   for (int i = 0; i < NUM_PORTS; i++) {
     if (ports[i].active)
-      o.printf("  Port %d: " MACSTR_ "  rate=%s  rxCh=0x%04X  last rx %lums ago\n", i + 1, MAC2STR_(ports[i].mac),
-                    enm_rate_name(ports[i].rate), ports[i].rxChMask, (unsigned long)(millis() - ports[i].lastRxMs));
+      o.printf("  Port %d: " MACSTR_ "  rate=%s  rxCh=0x%04X  last rx %lums ago  %s\n", i + 1, MAC2STR_(ports[i].mac),
+                    enm_rate_name(ports[i].rate), ports[i].rxChMask, (unsigned long)(millis() - ports[i].lastRxMs), ports[i].label);
     else o.printf("  Port %d: (free)\n", i + 1);
   }
 }
@@ -1651,14 +1717,32 @@ static void cmdExec(const Cmd &c, Print &o) {
     int cnt = 0;
     for (int i = 0; i < NUM_PORTS; i++) {
       if (!ports[i].active) continue;
-      o.printf("@%s + port=%d mac=" MACSTR_ " rx_channels=0x%04X phy_rate=%u idle_ms=%lu rssi=%d tx_fail=%lu\n", c.id, i + 1, MAC2STR_(ports[i].mac),
-               ports[i].rxChMask, ports[i].rate, (unsigned long)(millis() - ports[i].lastRxMs), ports[i].rssi, (unsigned long)ports[i].txFailCnt);
+      o.printf("@%s + port=%d mac=" MACSTR_ " rx_channels=0x%04X phy_rate=%u idle_ms=%lu rssi=%d tx_fail=%lu label=%s name=%s\n", c.id,
+               i + 1, MAC2STR_(ports[i].mac), ports[i].rxChMask, ports[i].rate, (unsigned long)(millis() - ports[i].lastRxMs), ports[i].rssi,
+               (unsigned long)ports[i].txFailCnt, ports[i].label, ports[i].devName);
       cnt++;
     }
     o.printf("@%s ok count=%d\n", c.id, cnt);
+  } else if (cmdIs(c, "label_request")) {  // label_request [<port>|all]: ask clients for their label again
+    int from = 0, to = NUM_PORTS - 1;
+    if (c.argc >= 2 && strcmp(c.argv[1], "all")) {
+      if (!cmdUint(c.argv[1], v) || v < 1 || v > NUM_PORTS) { cmdErr(c, o, "bad_port"); return; }
+      from = to = (int)v - 1;
+    }
+    int cnt = 0;
+    for (int i = from; i <= to; i++) {
+      if (!ports[i].active) continue;
+      ports[i].labelKnown = false;
+      ports[i].labelReqN = 1;
+      ports[i].labelReqMs = millis();
+      reply(ports[i].mac, PKT_LABEL_REQ, 0);
+      cnt++;
+    }
+    o.printf("@%s ok asked=%d\n", c.id, cnt);
   } else if (cmdIs(c, "registry")) {  // registered clients, one per line
     for (int i = 0; i < regCount; i++)
-      o.printf("@%s + mac=" MACSTR_ " port=%d\n", c.id, MAC2STR_(regMac[i]), portFind(regMac[i]) + 1);
+      o.printf("@%s + mac=" MACSTR_ " port=%d label=%s name=%s\n", c.id, MAC2STR_(regMac[i]), portFind(regMac[i]) + 1, regMeta[i].label,
+               regMeta[i].name);
     o.printf("@%s ok count=%d\n", c.id, regCount);
   } else if (cmdIs(c, "unregister")) {  // unregister <mac|all>
     uint8_t mac[6];
@@ -1672,6 +1756,7 @@ static void cmdExec(const Cmd &c, Print &o) {
       int pt = portFind(mac);
       if (pt >= 0) portFree(pt, "unregistered");
       memmove(regMac[r], regMac[r + 1], (regCount - r - 1) * 6);
+      memmove(&regMeta[r], &regMeta[r + 1], (regCount - r - 1) * sizeof(RegMeta));
       regCount--;
       if (regNext > regCount) regNext = 0;
       regSave();
@@ -1770,6 +1855,16 @@ static void loop() {
       relayLastSendMs = ms;
       relayResends++;
     }
+  }
+
+  // Ask clients for their label when it has not arrived some time after they connected (a client sends it by itself
+  // after connecting, so this covers a lost packet and clients that connected before this bridge restarted)
+  for (int i = 0; i < NUM_PORTS; i++) {
+    Port &pt = ports[i];
+    if (!pt.active || pt.labelKnown || pt.labelReqN >= LABEL_REQ_MAX || ms - pt.labelReqMs < LABEL_REQ_GAP_MS) continue;
+    pt.labelReqMs = ms;
+    pt.labelReqN++;
+    reply(pt.mac, PKT_LABEL_REQ, 0);
   }
 
   // Free ports of C6 units from which nothing arrives anymore

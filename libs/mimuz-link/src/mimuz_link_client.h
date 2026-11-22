@@ -11,6 +11,7 @@
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (send_lock)
  - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit)
  - 2026/11/22 : The BLE-MIDI send task takes its priority from Config::txTaskPriority like the ESP-NOW one (was fixed at 9)
+ - 2026/11/22 : Client label saved on the client and told to the bridge (get/set label)
 
 */
 // mimuz-link: communication layer for the client side (XIAO ESP32-C6, etc.)
@@ -369,6 +370,8 @@ static volatile uint16_t pingWaitSeq = 0xFFFF;
 static volatile uint16_t rxChMask = 0;
 static volatile uint8_t rxSubFlags = 0;     // ENM_SUB_SELF = also receive messages this device sent (for testing)
 static volatile bool subDirty = false;      // changed, so the bridge needs to be told
+static char label[ENM_LABEL_MAX + 1] = "";   // the user's name for this client (see ENM_LABEL_MAX)
+static volatile bool labelDirty = false;    // the bridge needs to be told the label (after a connect or a change)
 // Sequence number of received MIDI (to detect duplicates from retransmission)
 static uint16_t rxLastSeq = 0;
 static bool rxHaveSeq = false;
@@ -424,6 +427,9 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
       break;
     case PKT_CH_SWITCH:
       if (p.aux >= 1 && p.aux <= 13) pendingCh = (uint8_t)p.aux;
+      break;
+    case PKT_LABEL_REQ:  // the bridge asks for the label; sent from loop()
+      labelDirty = true;
       break;
     case PKT_PONG:
       if (p.seq == pingWaitSeq && pingTaskH) xTaskNotify(pingTaskH, t - p.t_us, eSetValueWithOverwrite);
@@ -580,6 +586,7 @@ static int tryConnectOn(uint8_t ch, uint32_t waitMs) {
     bridgeCh = real;
   }
   myPort = (int8_t)hsAux;
+  labelDirty = true;  // a new connection: the bridge does not know the label yet
   rxHaveSeq = false;  // the bridge's sequence numbers start from 0 on every connection
   rxPktCnt = 0;
   failStreak = 0;
@@ -991,6 +998,9 @@ static void loadSettings() {
   noteOnMaxAgeMs = prefs.getUShort("age", ENM_NOTEON_MAX_AGE_MS);
   uint8_t r = prefs.getUChar("rate", ENM_RATE_DEFAULT);
   rateIdx = r < ENM_RATE_NUM ? r : ENM_RATE_DEFAULT;
+  String l = prefs.getString("label", "");
+  if (enm_label_valid(l.c_str())) strlcpy(label, l.c_str(), sizeof(label));
+  else label[0] = 0;
 }
 // Reset settings to their defaults (the registration is kept)
 static void resetSettings() {
@@ -1004,13 +1014,13 @@ static void resetSettings() {
 
 // ---- Config commands (called from mimuz_link_cmd.h) ----
 static void cmdPrintSettings(Print &o) {
-  o.printf(" rx_channels=0x%04X noteon_max_age_ms=%u phy_rate=%u", rxChMask, noteOnMaxAgeMs, rateIdx);
+  o.printf(" rx_channels=0x%04X noteon_max_age_ms=%u phy_rate=%u label=%s", rxChMask, noteOnMaxAgeMs, rateIdx, label);
 }
 static void cmdExec(const Cmd &c, Print &o) {
   if (cmdIs(c, "info")) {
-    o.printf("@%s ok name=%s kind=client fw=%s transport=%s connected=%d port=%d radio_channel=%u bridge=%02X:%02X:%02X:%02X:%02X:%02X\n", c.id,
+    o.printf("@%s ok name=%s kind=client fw=%s transport=%s connected=%d port=%d radio_channel=%u bridge=%02X:%02X:%02X:%02X:%02X:%02X label=%s\n", c.id,
              devName, MIMUZ_LINK_VERSION, mode == MODE_ESPNOW ? "espnow" : "ble", (int)isConnected(), myPort + 1, bridgeCh, peerMac[0],
-             peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+             peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5], label);
   } else if (cmdIs(c, "get")) {
     if (c.argc == 1) {
       o.printf("@%s ok", c.id);
@@ -1020,6 +1030,7 @@ static void cmdExec(const Cmd &c, Print &o) {
     else if (!strcmp(c.argv[1], "noteon_max_age_ms")) o.printf("@%s ok noteon_max_age_ms=%u\n", c.id, noteOnMaxAgeMs);
     else if (!strcmp(c.argv[1], "phy_rate")) o.printf("@%s ok phy_rate=%u\n", c.id, rateIdx);
     else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    else if (!strcmp(c.argv[1], "label")) o.printf("@%s ok label=%s\n", c.id, label);
     else if (!strcmp(c.argv[1], "retry_limit"))
       o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, enm_retry_short(),
                enm_retry_long(), enmRetryDefShort, enmRetryDefLong);
@@ -1044,6 +1055,13 @@ static void cmdExec(const Cmd &c, Print &o) {
       if (!cmdUint(c.argv[2], v)) { cmdErr(c, o, "bad_value"); return; }
       enmSendLock = v != 0;
       o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    } else if (!strcmp(c.argv[1], "label")) {  // the user's name for this client; "-" clears it (saved)
+      const char *v = strcmp(c.argv[2], "-") ? c.argv[2] : "";
+      if (!enm_label_valid(v)) { cmdErr(c, o, "bad_value:up_to_30_of_A-Z_a-z_0-9_-_."); return; }
+      strlcpy(label, v, sizeof(label));
+      prefs.putString("label", label);
+      labelDirty = true;
+      o.printf("@%s ok label=%s\n", c.id, label);
     } else if (!strcmp(c.argv[1], "retry_limit")) {  // radio retry limit, 0 = the library's value (not saved)
       if (!cmdUint(c.argv[2], v) || v > 31) { cmdErr(c, o, "bad_value"); return; }
       retryLimit = (uint8_t)v;
@@ -1152,6 +1170,19 @@ static void loop() {
         delay(30);  // wait for the reply to go out
         cmdAfter();
       }
+    }
+    // A new connection or a changed label -> tell the bridge (kept pending if the radio refused it)
+    if (labelDirty && connected) {
+      uint8_t lb[ENM_HDR_LEN + ENM_LABEL_MAX + 1 + ENM_DEVNAME_MAX];
+      enm_pkt_t h;
+      enm_init(h, PKT_LABEL);
+      size_t n = strlen(label), dn = strnlen(devName, ENM_DEVNAME_MAX);
+      h.len = (uint8_t)n;
+      memcpy(lb, &h, ENM_HDR_LEN);
+      memcpy(lb + ENM_HDR_LEN, label, n);
+      lb[ENM_HDR_LEN + n] = (uint8_t)dn;
+      memcpy(lb + ENM_HDR_LEN + n + 1, devName, dn);
+      if (enmSendRaw(lb, ENM_HDR_LEN + n + 1 + dn) == ESP_OK) labelDirty = false;
     }
     // Listen channels changed -> tell the bridge
     if (subDirty) {

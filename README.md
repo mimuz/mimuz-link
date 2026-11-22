@@ -137,13 +137,15 @@ Open the port with DTR on (the C6 resets if the port is opened with DTR off; the
 | both | `get [key]` / `set <key> <value>` | read and write settings |
 | C6 | key `rx_channels` | MIDI channels to listen to (bit0 = channel 1; `omni` and `none` are also accepted) |
 | C6 | key `noteon_max_age_ms` | age after which a waiting Note On is dropped (0 = never; default 80) |
+| C6 | key `label` | your name for this client (up to 30 of `A-Z a-z 0-9 - _ .`; `-` clears it). Saved on the client and told to the bridge on every connect and change, and whenever the bridge asks; shown by `info` and in the bridge's `ports` list. Not used as the USB or BLE device name: applications can pick a client by its label (free; several clients may share one on purpose) or by its device name (unique) |
 | C6 | key `phy_rate` | radio rate (0=1M 1=6M 2=24M 3=MCS4; default 1) |
 | C6 | `reset` / `unpair` / `restart [auto\|ble]` | reset settings to defaults / erase registration and reboot / reboot |
 | both | `radio_restart [wifi\|stall]` | diagnostic: restart ESP-NOW. `wifi` = restart Wi-Fi as well, `stall` = simulate a stuck driver (the device should detect it and restart by itself). The bridge also takes `driver` = reinitialize the Wi-Fi driver, and `stall hold` = a stuck driver that survives restarts (recovery escalates up to a device restart) |
 | bridge | keys `channel_min`, `channel_max` | range of radio channels that may be chosen (takes effect at the next survey) |
 | bridge | key `noteon_max_age_ms` | same as above, for the PC → client direction |
-| bridge | `ports` / `registry` / `survey` | connected ports (also shows per-port signal strength `rssi` and undelivered count `tx_fail`) / registered clients / latest radio channel survey |
+| bridge | `ports` / `registry` / `survey` | connected ports (also shows per-port signal strength `rssi`, undelivered count `tx_fail`, and the client's `label` and device `name`, which an ESP-NOW client tells only to its bridge) / registered clients (with the last `label` and `name` each told, kept with the registration) / latest radio channel survey |
 | bridge | `unregister <MAC\|all>` | remove a registration |
+| bridge | `label_request [<port>\|all]` | ask clients for their label again (the bridge also asks by itself when a client's label has not arrived 2 s after it connected, up to 5 times) |
 | bridge | `resurvey` / `switch_channel <n>` | survey the radio channels again and choose one (about 12 s) / move to the given radio channel |
 | bridge | `port <n> <command…>` | relay a command over the radio to the client on port n (e.g. `@5 port 2 set rx_channels omni`). Resent every 150 ms until a reply arrives; `err timeout` after 1.5 s |
 | bridge | key `tx_parallel` | 1 = hand packets to the radio in parallel, one per client (default; a hard-to-reach client holds up the others less); 0 = one packet at a time overall, for comparison. Not saved |
@@ -160,6 +162,10 @@ Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port>
 
 - C6 (`c6_test_device`): `p` / `P` = measure the radio round trip 10,000 / 100,000 times, `s` = statistics, `c` = clear statistics, `r0`–`r3` = PHY rate, `b` = reboot fixed to BLE, `e` = reboot in automatic mode, `u` = erase registration and register again.
 - Bridge (`s3_bridge`): `s` = statistics, `c` = clear statistics, `l` = list registrations and ports, `x` = erase all registrations, `v` = toggle logging of every message, `h` = radio channel survey results, `H` = survey again and choose, `1`–`9` and `A`–`D` = move to radio channel 1–13, `z` = stop receiving for 150 ms.
+
+## Web console (`web-console/`)
+
+A maintenance page in the browser (Web Serial, Chrome or Edge) for the bridges and clients attached over USB: device list, clients of each bridge, settings, radio channel, diagnostics and a command console. `cd web-console && npm install && npm start`, then open http://localhost:8080. See `web-console/README.md`.
 
 ## PC tools (`examples/pc/`)
 
