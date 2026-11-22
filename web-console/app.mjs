@@ -9,11 +9,12 @@
 
  - 2026/11/22 : Start Writing
  - 2026/11/22 : Serve ESP Web Tools from node_modules for the firmware uploader
+ - 2026/11/22 : ESP Web Tools comes from unpkg again (the page is hosted with git pull and npm start only)
 
 */
-// Serves ./www, and ESP Web Tools (the firmware uploader's flashing component) from node_modules at
-// /vendor/esp-web-tools, so that the page needs nothing from the internet. The page talks to the devices itself
-// through Web Serial, so the server only hosts files.
+// Serves ./www (the page and the firmware it writes, both kept in git), so the site is hosted with "git pull" and
+// "npm start". The firmware uploader loads ESP Web Tools from unpkg. The page talks to the devices itself through
+// Web Serial, so the server only hosts files.
 // Web Serial needs a secure context; http://localhost counts as one, so the server listens on the loopback address.
 //
 // usage: node app.mjs            (http://localhost:8080)
@@ -32,7 +33,6 @@ const setHeaders = (res, file) => {
   if (file.endsWith('manifest.json')) res.setHeader('Cache-Control', 'no-cache');  // a rebuilt firmware shows at once
 };
 app.use(express.static(path.join(dir, 'www'), { setHeaders }));
-app.use('/vendor/esp-web-tools', express.static(path.join(dir, 'node_modules/esp-web-tools/dist/web')));
 
 app.listen(port, host, () => {
   console.log(`mimuz-link web console: http://${host === '127.0.0.1' ? 'localhost' : host}:${port}/`);

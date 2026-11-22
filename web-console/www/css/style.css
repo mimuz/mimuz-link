@@ -169,3 +169,6 @@ button.link { border: 0; background: none; color: var(--accent); padding: 0 4px;
 .fw-steps { padding-left: 20px; margin: 8px 0 12px; }
 .fw-steps li { margin: 3px 0; }
 esp-web-install-button button { margin: 0; }
+
+.credit { text-align: center; padding: 10px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); background: var(--panel); }
+.credit a { color: var(--muted); }

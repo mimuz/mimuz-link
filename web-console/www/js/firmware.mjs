@@ -8,10 +8,11 @@
  ver. history
 
  - 2026/11/22 : Start Writing
+ - 2026/11/22 : Load ESP Web Tools from unpkg (fixed version)
 
 */
 // Writes the bridge and client firmware built by firmware/build.sh (www/firmware/<name>/manifest.json) with
-// ESP Web Tools (served from node_modules at /vendor/esp-web-tools). Only the bootloader, the partition table,
+// ESP Web Tools (loaded from unpkg, version fixed in ESP_WEB_TOOLS). Only the bootloader, the partition table,
 // boot_app0 and the application are written, so the settings in NVS (pairing, label, ...) are kept.
 //
 // The bridge runs its own USB (MIDI and serial), so it has to be restarted into the ROM's download mode first: opening
@@ -43,11 +44,13 @@ const FIRMWARE = [
   },
 ];
 
+const ESP_WEB_TOOLS = 'https://unpkg.com/esp-web-tools@10.5.2/dist/web/install-button.js';
+
 let webToolsLoaded = null;
 function loadWebTools() {
-  webToolsLoaded ??= import('/vendor/esp-web-tools/install-button.js').catch((e) => {
+  webToolsLoaded ??= import(ESP_WEB_TOOLS).catch((e) => {
     webToolsLoaded = null;
-    throw new Error(`could not load ESP Web Tools (${e.message}); run "npm install" in web-console`);
+    throw new Error(`could not load ESP Web Tools from unpkg (${e.message}); the firmware uploader needs the internet`);
   });
   return webToolsLoaded;
 }

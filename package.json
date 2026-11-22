@@ -1,0 +1,16 @@
+{
+  "name": "mimuz-link",
+  "version": "0.1.0",
+  "description": "MIDI over ESP-NOW link layer for mi:muz devices: library, examples, web console and firmware uploader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "sh ./web-console/firmware/build.sh",
+    "release": "sh ./web-console/firmware/release.sh",
+    "start": "cd ./web-console && npm start",
+    "server": "cd ./web-console && npm install --omit=dev --no-audit --no-fund && (npx --yes pm2 delete mimuz-link-console || true) && npx --yes pm2 start ./app.mjs --name mimuz-link-console",
+    "version": "node ./web-console/firmware/sync-version.mjs && git add libs/mimuz-link/library.properties libs/mimuz-link/src/mimuz_link_proto.h web-console/package.json web-console/package-lock.json"
+  },
+  "author": "D.F.Mac. @TripArts Music",
+  "license": "MIT"
+}

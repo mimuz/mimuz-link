@@ -165,7 +165,27 @@ Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port>
 
 ## Web console (`web-console/`)
 
-A maintenance page in the browser (Web Serial, Chrome or Edge) for the bridges and clients attached over USB: device list, clients of each bridge, settings, radio channel, diagnostics and a command console. `cd web-console && npm install && npm start`, then open http://localhost:8080. See `web-console/README.md`.
+A maintenance page in the browser (Web Serial, Chrome or Edge) for the bridges and clients attached over USB: device list, clients of each bridge, settings, radio channel, diagnostics and a command console. `npm start` at the top of the repository, then open http://localhost:8080. See `web-console/README.md`.
+
+## Versions and releases
+
+The version is kept in the top `package.json` and in the git tag `v<version>`.
+
+```sh
+npm run release -- 0.2.0                        # see below; nothing is pushed
+git push origin main && git push origin v0.2.0  # the tag last
+```
+
+`npm run release -- <version>` (web-console/firmware/release.sh), on a clean working tree:
+
+1. writes the version into package.json, the firmware (`MIMUZ_LINK_VERSION`), library.properties and
+   web-console/package.json (`npm version <version> --no-git-tag-version`), and commits "Version <version>";
+2. builds the bridge and client firmware from that commit (`npm run build`, arduino-cli) and commits it
+   (web-console/www/firmware, "Firmware <version>");
+3. tags that commit `v<version>`, so the tag holds the firmware built for it.
+
+`npm run build` alone builds for testing; it stops if the sources do not carry the version in `package.json`, and
+warns about uncommitted changes. Each manifest records the version and the source commit.
 
 ## PC tools (`examples/pc/`)
 

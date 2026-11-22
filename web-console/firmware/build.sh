@@ -8,6 +8,8 @@
 #  ver. history
 #
 #  - 2026/11/22 : Start Writing
+#  - 2026/11/22 : Version from the top package.json (checked against the firmware); run by "npm run build"
+#  - 2026/11/22 : Record the source commit; quiet about the missing tag when run by release.sh
 #
 # Builds the bridge (examples/bridge/s3_bridge) and the client (examples/client/c6_test_device) with arduino-cli and
 # puts, for each, the bootloader, the partition table, boot_app0 and the application into www/firmware/<name>/ with
@@ -15,7 +17,12 @@
 # image is not used because it covers the whole flash and would also overwrite the settings (NVS at 0x9000-0xDFFF:
 # pairing, label, ...).
 #
-# usage: web-console/firmware/build.sh   (needs arduino-cli with the esp32 core, see the README)
+# The version comes from the top package.json (kept with the git tag v<version>; "npm version" changes both and
+# copies it into the firmware sources). The build stops if the sources do not carry the same version, and warns if
+# there are uncommitted changes or (except in a release, see release.sh, where the tag comes after the firmware
+# commit) the commit is not the one tagged v<version>. Each manifest records the source commit ("rev").
+#
+# usage: npm run build   (or web-console/firmware/build.sh; needs arduino-cli with the esp32 core, see the README)
 set -e
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,8 +30,18 @@ OUT="$ROOT/web-console/www/firmware"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-VERSION=$(sed -n 's/^#define MIMUZ_LINK_VERSION "\(.*\)"/\1/p' "$ROOT/libs/mimuz-link/src/mimuz_link_proto.h")
-REV=$(git -C "$ROOT" describe --always --dirty 2>/dev/null || echo unknown)
+VERSION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version)' "$ROOT/package.json")
+node "$ROOT/web-console/firmware/sync-version.mjs" --check || {
+  echo "the version in the sources differs from package.json ($VERSION); run: node web-console/firmware/sync-version.mjs" >&2
+  exit 1
+}
+REV=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git -C "$ROOT" status --porcelain -- . ':!web-console/www/firmware' 2>/dev/null)" ]; then
+  REV="$REV-dirty"
+  echo "warning: building with uncommitted changes ($REV); a release is built by: npm run release -- <version>" >&2
+elif [ -z "$MIMUZ_RELEASE" ] && [ "$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null)" != "v$VERSION" ]; then
+  echo "warning: $REV is not the commit tagged v$VERSION (fine for testing; a release is built by: npm run release -- <version>)" >&2
+fi
 BUILT=$(date +%Y-%m-%dT%H:%M:%S%z)
 DATA=$(arduino-cli config get directories.data)
 CORE=$(ls -d "$DATA"/packages/esp32/hardware/esp32/*/ | sort -V | tail -1)

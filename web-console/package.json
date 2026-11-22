@@ -6,14 +6,15 @@
   "type": "module",
   "main": "app.mjs",
   "scripts": {
+    "prestart": "npm install --omit=dev --no-audit --no-fund",
     "start": "node app.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "esp-web-tools": "^10.5.2",
     "express": "^4.21.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "D.F.Mac. @TripArts Music"
 }
