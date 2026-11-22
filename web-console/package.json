@@ -1,0 +1,19 @@
+{
+  "name": "mimuz-link-web-console",
+  "version": "0.1.0",
+  "description": "Maintenance web console and firmware uploader for mimuz-link bridges and clients (Web Serial)",
+  "private": true,
+  "type": "module",
+  "main": "app.mjs",
+  "scripts": {
+    "start": "node app.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "esp-web-tools": "^10.5.2",
+    "express": "^4.21.2"
+  },
+  "license": "MIT"
+}

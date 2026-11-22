@@ -1,0 +1,64 @@
+<!doctype html>
+<!--
+
+ index.html mimuz-link web console
+
+ ©2026 by D.F.Mac.@TripArts Music
+ Programmed by Claude Code
+
+ ver. history
+
+ - 2026/11/22 : Start Writing
+ - 2026/11/22 : Device names from Web MIDI
+ - 2026/11/22 : No separate list of the devices on MIDI
+ - 2026/11/22 : No automatic connection (the page keeps no device history)
+ - 2026/11/22 : Remove the names from Web MIDI
+ - 2026/11/22 : "Add device" is now "Load device"
+ - 2026/11/22 : Two pages: Console and Firmware uploader; "Load device" moves into the Console page
+
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mimuz-link console</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>mimuz-link</h1>
+    <nav class="pages">
+      <a href="#console" class="page-tab" data-page="console">Console</a>
+      <a href="#firmware" class="page-tab" data-page="firmware">Firmware uploader</a>
+    </nav>
+  </header>
+  <p id="unsupported" class="notice" hidden>
+    This browser has no Web Serial. Use Chrome or Edge, and open the page from http://localhost.
+  </p>
+
+  <section id="page-console" class="page">
+    <div class="toolbar">
+      <button id="add" class="primary">Load device</button>
+      <span class="muted small">Choose the serial port of a bridge or a client attached over USB.</span>
+    </div>
+    <div class="layout">
+      <aside>
+        <h2>Devices</h2>
+        <ul id="devices" class="devices"></ul>
+        <p class="muted small">
+          A serial port can be open in one program only: close it here before using the PC tools or the firmware
+          uploader on the same device.
+        </p>
+      </aside>
+      <main id="detail"></main>
+    </div>
+  </section>
+
+  <section id="page-firmware" class="page" hidden>
+    <div id="firmware"></div>
+  </section>
+
+  <script type="module" src="js/main.mjs"></script>
+  <script type="module" src="js/firmware.mjs"></script>
+</body>
+</html>
