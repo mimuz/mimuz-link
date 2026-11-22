@@ -9,6 +9,7 @@
 
  - 2026/11/19 : Start Writing
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (enm_radio_send)
+ - 2026/11/22 : Set the radio retry limit (enm_retry_set)
 
 */
 // mimuz-link: protocol definitions (shared by client and bridge)
@@ -218,6 +219,25 @@ static void enm_radio_block() {
   while (enmSendUsers.load() > 0 && millis() - t0 < 100) vTaskDelay(1);
 }
 static void enm_radio_unblock() { enmRadioDown = false; }
+
+// ---- Radio retry limit ----
+// The radio sends the frames handed to it one after another. While it retries a frame that is not acknowledged (a far
+// peer), the frames behind it wait, so one undelivered frame can hold up every other peer for 10-20 ms.
+// The Wi-Fi library keeps its retry limits in lmacConfMib (byte 21 = frames below the RTS threshold, which all ESP-NOW
+// frames are; byte 20 = longer frames) and sets them with esp_wifi_internal_set_retry_counter(short, long), the same on
+// the ESP32-S3 and the ESP32-C6. Neither is in the public headers. The limit is read again on every failed attempt, so
+// a change applies at once. Reinitializing the Wi-Fi driver brings back the library's value (32).
+extern "C" uint8_t lmacConfMib[];
+extern "C" esp_err_t esp_wifi_internal_set_retry_counter(uint8_t src, uint8_t lrc);
+static uint8_t enmRetryDefShort = 0, enmRetryDefLong = 0;  // the library's values, read on the first call
+static inline uint8_t enm_retry_short() { return lmacConfMib[21]; }
+static inline uint8_t enm_retry_long() { return lmacConfMib[20]; }
+// limit = 0: the library's values. Call it first after Wi-Fi has started, before anything else changes the limits
+static void enm_retry_set(uint8_t limit) {
+  if (!enmRetryDefShort && !enmRetryDefLong) { enmRetryDefShort = lmacConfMib[21]; enmRetryDefLong = lmacConfMib[20]; }
+  if (limit) esp_wifi_internal_set_retry_counter(limit, limit);
+  else esp_wifi_internal_set_retry_counter(enmRetryDefShort, enmRetryDefLong);
+}
 
 // ---- PHY rate (esp_now_set_peer_rate_config) ----
 // 0: 11b 1Mbps (ESP-NOW default)  1: 11g 6Mbps  2: 11g 24Mbps  3: HT20 MCS4(39Mbps)

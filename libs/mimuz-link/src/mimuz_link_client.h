@@ -9,6 +9,7 @@
 
  - 2026/11/19 : Start Writing
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (send_lock)
+ - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit)
 
 */
 // mimuz-link: communication layer for the client side (XIAO ESP32-C6, etc.)
@@ -180,6 +181,8 @@ static uint16_t noMemStreak = 0;
 static void onSent(const esp_now_send_info_t *info, esp_now_send_status_t st);
 static void onRecv(const esp_now_recv_info_t *info, const uint8_t *d, int n);
 static uint8_t stallChannel();
+// Radio retry limit (see enm_retry_set). 0 = the library's value (32). Applied whenever ESP-NOW starts or restarts
+static uint8_t retryLimit = 0;
 // Restart ESP-NOW (and Wi-Fi too if withWifi = true). Restores the link to the bridge (peer registration, rate, channel)
 static void radioRestart(bool withWifi) {
   Serial.println(withWifi ? "radio stalled again: restarting Wi-Fi and ESP-NOW" : "radio stalled: restarting ESP-NOW");
@@ -196,6 +199,7 @@ static void radioRestart(bool withWifi) {
   esp_now_register_send_cb(onSent);
   esp_now_register_recv_cb(onRecv);
   enm_radio_unblock();
+  enm_retry_set(retryLimit);
   if (paired) {
     esp_now_peer_info_t pi = {};
     memcpy(pi.peer_addr, peerMac, 6);
@@ -477,6 +481,7 @@ static void espnowInit() {
   esp_now_register_send_cb(onSent);
   esp_now_register_recv_cb(onRecv);
   enm_radio_unblock();
+  enm_retry_set(retryLimit);
 }
 static void espnowStop() {
   enm_radio_block();
@@ -1014,6 +1019,9 @@ static void cmdExec(const Cmd &c, Print &o) {
     else if (!strcmp(c.argv[1], "noteon_max_age_ms")) o.printf("@%s ok noteon_max_age_ms=%u\n", c.id, noteOnMaxAgeMs);
     else if (!strcmp(c.argv[1], "phy_rate")) o.printf("@%s ok phy_rate=%u\n", c.id, rateIdx);
     else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    else if (!strcmp(c.argv[1], "retry_limit"))
+      o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, enm_retry_short(),
+               enm_retry_long(), enmRetryDefShort, enmRetryDefLong);
     else cmdErr(c, o, "unknown_key");
   } else if (cmdIs(c, "set")) {
     uint32_t v;
@@ -1035,6 +1043,11 @@ static void cmdExec(const Cmd &c, Print &o) {
       if (!cmdUint(c.argv[2], v)) { cmdErr(c, o, "bad_value"); return; }
       enmSendLock = v != 0;
       o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
+    } else if (!strcmp(c.argv[1], "retry_limit")) {  // radio retry limit, 0 = the library's value (not saved)
+      if (!cmdUint(c.argv[2], v) || v > 31) { cmdErr(c, o, "bad_value"); return; }
+      retryLimit = (uint8_t)v;
+      enm_retry_set(retryLimit);
+      o.printf("@%s ok retry_limit=%u short=%u long=%u\n", c.id, retryLimit, enm_retry_short(), enm_retry_long());
     } else if (!strcmp(c.argv[1], "phy_rate")) {
       if (!cmdUint(c.argv[2], v) || v >= ENM_RATE_NUM) { cmdErr(c, o, "bad_value"); return; }
       setRate((uint8_t)v);

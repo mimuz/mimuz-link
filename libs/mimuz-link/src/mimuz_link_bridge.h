@@ -750,26 +750,13 @@ struct PTx {
 static PTx ptx[NUM_PORTS];
 static void ptxAbortInflight();
 
-// ---- Radio retry limit ----
-// The radio sends the frames handed to it one after another. While it retries a frame that is not acknowledged (a far
-// client), the frames behind it wait, so one undelivered frame can hold up every other client for 10-20 ms.
-// The Wi-Fi library keeps its retry limits in lmacConfMib (byte 21 = frames below the RTS threshold, which all ESP-NOW
-// frames are; byte 20 = longer frames) and sets them with esp_wifi_internal_set_retry_counter(short, long). Neither is
-// in the public headers. The limit is read again on every failed attempt, so a change applies at once.
+// ---- Radio retry limit (see enm_retry_set) ----
 // The library's limit is 32. With 8, the longest delays of near clients while a far client (about -87 dBm) does not
 // answer were about 2.6 ms shorter (p99 about 0.9 ms), while that far client lost about 0.6% of its packets instead of
 // 0.08% (Note Offs are resent by this bridge). Going below 8 did not shorten the delays further and lost more packets.
 // retryLimit = 0 leaves the library's value; otherwise it is applied at startup and again after every restart of the radio.
 #define ENM_RETRY_LIMIT_DEFAULT 8
-extern "C" uint8_t lmacConfMib[];
-extern "C" esp_err_t esp_wifi_internal_set_retry_counter(uint8_t src, uint8_t lrc);
 static uint8_t retryLimit = ENM_RETRY_LIMIT_DEFAULT;
-static uint8_t retryDefShort = 0, retryDefLong = 0;  // the library's values, read at startup
-static void retryApply() {
-  if (!retryDefShort && !retryDefLong) { retryDefShort = lmacConfMib[21]; retryDefLong = lmacConfMib[20]; }
-  if (retryLimit) esp_wifi_internal_set_retry_counter(retryLimit, retryLimit);
-  else esp_wifi_internal_set_retry_counter(retryDefShort, retryDefLong);
-}
 
 // ---- Slow radio sends (diagnostic) ----
 // A packet whose result (delivered or not) came slowTxUs or more after it was handed to the radio is recorded with its
@@ -828,7 +815,7 @@ static void radioRestart(uint8_t level) {
     addPeer(ports[i].mac);
     enm_apply_rate(ports[i].mac, ports[i].rate);
   }
-  if (retryLimit) retryApply();
+  if (retryLimit) enm_retry_set(retryLimit);
   if (!debugStallHold) debugStallFlag = false;
   ptxAbortInflight();  // notifications for packets already handed over will never arrive
   txTimeoutStreak = 0;
@@ -1577,8 +1564,8 @@ static void cmdExec(const Cmd &c, Print &o) {
     else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
     else if (!strcmp(c.argv[1], "trace_status")) o.printf("@%s ok trace_status=%u\n", c.id, traceStatus);
     else if (!strcmp(c.argv[1], "retry_limit"))
-      o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, lmacConfMib[21],
-               lmacConfMib[20], retryDefShort, retryDefLong);
+      o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, enm_retry_short(),
+               enm_retry_long(), enmRetryDefShort, enmRetryDefLong);
     else if (!strcmp(c.argv[1], "slow_tx_ms")) o.printf("@%s ok slow_tx_ms=%lu\n", c.id, (unsigned long)(slowTxUs / 1000));
     else cmdErr(c, o, "unknown_key");
   } else if (cmdIs(c, "set")) {
@@ -1618,8 +1605,8 @@ static void cmdExec(const Cmd &c, Print &o) {
     } else if (!strcmp(c.argv[1], "retry_limit")) {  // radio retry limit, 0 = the library's value (not saved)
       if (v > 31) { cmdErr(c, o, "bad_value"); return; }
       retryLimit = (uint8_t)v;
-      retryApply();
-      o.printf("@%s ok retry_limit=%u short=%u long=%u\n", c.id, retryLimit, lmacConfMib[21], lmacConfMib[20]);
+      enm_retry_set(retryLimit);
+      o.printf("@%s ok retry_limit=%u short=%u long=%u\n", c.id, retryLimit, enm_retry_short(), enm_retry_long());
     } else if (!strcmp(c.argv[1], "slow_tx_ms")) {  // diagnostic: record radio sends whose result took this long, 0 = off (not saved)
       if (v > 1000) { cmdErr(c, o, "bad_value"); return; }
       slowTxUs = v * 1000;
@@ -1730,9 +1717,7 @@ static void begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
-  retryDefShort = lmacConfMib[21];
-  retryDefLong = lmacConfMib[20];
-  retryApply();
+  enm_retry_set(retryLimit);
   // Measure congestion on all channels at startup and choose the channel (about 12 s).
   // After a restart caused by a stalled radio, keep the channel the clients are on
   uint32_t svT0 = millis();

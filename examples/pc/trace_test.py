@@ -12,6 +12,7 @@
 #  - 2026/11/22 : Time the round trips with mlping (C, CoreMIDI) by default, so that Python's thread scheduling is not included
 #  - 2026/11/22 : Show the bridge's late radio sends (slowtx) grouped by time, with the slow pings that fall in each group
 #  - 2026/11/22 : Change bridge settings per round (--bridge-set), to compare them in turn
+#  - 2026/11/22 : Send any bridge commands per round (--bridge-cmd), e.g. to change client settings through the bridge
 #
 """Split round trips to several clients into the part spent in the bridge (and on the radio) and the part spent on the PC side.
 
@@ -45,6 +46,8 @@ packet to a far client points at the radio retrying that packet; one with only d
 
 --bridge-set "retry_limit 0;retry_limit 4" sends `set <key> <value>` to the bridge before each round, taking the
 entries in turn (round 1 the first, round 2 the second, ...), so that settings can be compared under the same conditions.
+--bridge-cmd works the same way with whole commands, several in one entry separated by '|', e.g.
+"port 4 set retry_limit 0|port 5 set retry_limit 0;port 4 set retry_limit 8|port 5 set retry_limit 8".
 
 usage: trace_test.py --bridge /dev/cu.usbmodemXXXX [--ports 1,2,3,4,5,6] [--secs 45] [--rounds 5] [--log trace.jsonl]
                      [--switch 0.005,0.0005] [--gc on,off] [--slow 8]
@@ -193,6 +196,7 @@ def main():
     ap.add_argument("--slow", type=float, default=8.0, help="round trips at least this long [ms] are broken down")
     ap.add_argument("--engine", choices=["c", "python"], default="c", help="who sends and times the round trips")
     ap.add_argument("--bridge-set", default="", help="bridge settings 'key value;key value', one per round in turn")
+    ap.add_argument("--bridge-cmd", default="", help="bridge commands 'cmd|cmd;cmd|cmd', one entry per round in turn")
     ap.add_argument("--slow-tx", type=int, default=10, help="record radio sends whose result took this long [ms], 0 = off")
     ap.add_argument("--log", default="")
     a = ap.parse_args()
@@ -221,6 +225,17 @@ def main():
                 r = read_serial(a.bridge, [f"@1 set {bs}\n"], wait=0.3)
                 if "@1 ok" not in r:
                     raise SystemExit(f"bridge did not take 'set {bs}': {r.strip()}")
+            bcmd = [x.strip() for x in a.bridge_cmd.split(";") if x.strip()]
+            bc = bcmd[(rnd - 1) % len(bcmd)] if bcmd else ""
+            for i, cmd in enumerate(x.strip() for x in bc.split("|") if x.strip()):
+                for _ in range(3):  # a command relayed to a client is resent by the bridge for up to 1.5 s
+                    r = read_serial(a.bridge, [f"@{i + 1} {cmd}\n"], wait=2.0)
+                    if f"@{i + 1} ok" in r:
+                        break
+                else:
+                    raise SystemExit(f"bridge did not take '{cmd}': {r.strip()}")
+            if bc:
+                bs = (bs + " | " if bs else "") + bc
             read_serial(a.bridge, ["@1 trace clear\n", "@2 slowtx clear\n"], wait=0.3)
             for x in arr.values():
                 x.clear()
@@ -299,6 +314,8 @@ def main():
         cmds = ["@1 set trace_status 0\n"]
         if a.bridge_set:  # leave the bridge with the first setting given (the reference)
             cmds.append(f"@2 set {a.bridge_set.split(';')[0].strip()}\n")
+        if a.bridge_cmd:  # and with the first commands given
+            cmds += [f"@{i + 3} {c.strip()}\n" for i, c in enumerate(a.bridge_cmd.split(";")[0].split("|")) if c.strip()]
         read_serial(a.bridge, cmds, wait=0.3)
 
 
