@@ -89,6 +89,7 @@ mlink::printStats(Serial); mlink::printList(Serial); mlink::printSurvey(); mlink
 ```
 
 - This is a header-only library: include it from only one file of the sketch.
+- The library uses parts of the esp32 core and ESP-IDF that are not public API (the radio retry counter, the Wi-Fi driver lock, the TinyUSB interface hooks), so it is verified only with esp32 core 3.3.8 and the build stops with an error on any other core. Install it with `arduino-cli core install esp32:esp32@3.3.8`. To try another core anyway, define `MIMUZ_LINK_ALLOW_UNTESTED_CORE` (with arduino-cli: `--build-property "compiler.cpp.extra_flags=-DMIMUZ_LINK_ALLOW_UNTESTED_CORE"`); the build then only warns.
 - Hot paths are placed in internal fast memory (IRAM). On the bridge this shortens the round trip by about 0.15 ms. For comparison, define `MIMUZ_LINK_NO_IRAM` to place them in flash instead (with arduino-cli: `--build-property "compiler.cpp.extra_flags=-DMIMUZ_LINK_NO_IRAM"`).
 
 ## Build and upload (arduino-cli, esp32 core 3.3.8)

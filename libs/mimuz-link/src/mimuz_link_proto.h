@@ -11,6 +11,7 @@
  - 2026/11/21 : Hand packets to the radio under the Wi-Fi driver's global lock (enm_radio_send)
  - 2026/11/22 : Set the radio retry limit (enm_retry_set)
  - 2026/11/22 : Client label (PKT_LABEL)
+ - 2026/11/23 : Stop the build on an esp32 core other than the verified one (MIMUZ_LINK_ALLOW_UNTESTED_CORE)
 
 */
 // mimuz-link: protocol definitions (shared by client and bridge)
@@ -22,6 +23,23 @@
 #include <esp_now.h>
 #include <atomic>
 #include <Arduino.h>
+
+// The library uses parts of the esp32 core and ESP-IDF that are not public API: esp_wifi_internal_set_retry_counter
+// (declared here, so a changed signature would still compile and link), the Wi-Fi driver lock g_osi_funcs_p
+// (esp_private/wifi_os_adapter.h), and the TinyUSB interface hooks of the Arduino core (bridge). They may change in any
+// core release without notice, so the build stops on a core other than the verified one. To try another core anyway,
+// define MIMUZ_LINK_ALLOW_UNTESTED_CORE (with arduino-cli:
+// --build-property "compiler.cpp.extra_flags=-DMIMUZ_LINK_ALLOW_UNTESTED_CORE"); it then only warns.
+#if !defined(ESP_ARDUINO_VERSION)
+#error "mimuz-link: needs the esp32 Arduino core 3.3.8"
+#elif ESP_ARDUINO_VERSION != ESP_ARDUINO_VERSION_VAL(3, 3, 8)
+#if defined(MIMUZ_LINK_ALLOW_UNTESTED_CORE)
+#warning "mimuz-link: built with an esp32 core other than the verified 3.3.8 (MIMUZ_LINK_ALLOW_UNTESTED_CORE)"
+#else
+#error "mimuz-link: verified only with esp32 core 3.3.8; install it (arduino-cli core install esp32:esp32@3.3.8) or define MIMUZ_LINK_ALLOW_UNTESTED_CORE"
+#endif
+#endif
+
 #include <esp_private/wifi_os_adapter.h>
 
 #define ENM_MAGIC 0xE7
