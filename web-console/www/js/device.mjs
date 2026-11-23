@@ -10,6 +10,7 @@
  - 2026/11/22 : Start Writing
  - 2026/11/22 : USB key of a port (to remember which device it was)
  - 2026/11/22 : Remove the USB key again (names are no longer remembered per USB ID)
+ - 2026/11/23 : Keep asking "info" while the device is still starting
 
 */
 // Config command protocol of mimuz-link over USB serial (see the README, "Config commands"):
@@ -23,6 +24,10 @@
 
 const BAUD = 115200;
 const DEFAULT_TIMEOUT_MS = 3000;
+// A bridge does not reply while it surveys the channels at start (about 12 s, e.g. right after a firmware update), so
+// "info" is asked again until this long after the port was opened.
+const START_WAIT_MS = 25000;
+const START_RETRY_TIMEOUT_MS = 2000;
 
 // Keys whose values are names, never numbers (a label "007" must stay "007")
 const TEXT_KEYS = new Set(['label', 'name', 'mac', 'bridge', 'fw']);
@@ -48,6 +53,7 @@ export class Device extends EventTarget {
     this.usb = { vid: info.usbVendorId, pid: info.usbProductId, serial: info.usbSerialNumber };
     this.info = null;     // reply of "info" (name, kind, fw, ...)
     this.open = false;
+    this.starting = false;  // opened, but "info" has not been answered yet
     this.attached = port.connected !== false;  // plugged in (Web Serial lists ports the page was allowed to use, plugged in or not)
     this.busy = false;
     this.nextId = 1;
@@ -70,19 +76,34 @@ export class Device extends EventTarget {
     this.writeClosed = enc.readable.pipeTo(this.port.writable).catch(() => {});
     this.writer = enc.writable.getWriter();
     this.readLoop();
+    this.starting = true;
     this.emit('state');
-    try {
-      const r = await this.command('info');
-      if (r.ok) this.info = r.fields;
-    } catch (e) {
-      this.log('sys', `info failed: ${e.message}`);
+    const until = Date.now() + START_WAIT_MS;
+    let told = false;
+    while (this.open) {
+      try {
+        const r = await this.command('info', { timeout: START_RETRY_TIMEOUT_MS });
+        if (r.ok) this.info = r.fields;
+        else this.log('sys', `info failed: ${r.error}`);
+        break;
+      } catch (e) {
+        if (!this.open) break;
+        if (Date.now() >= until) {
+          this.log('sys', `info failed: ${e.message} (no reply for ${START_WAIT_MS / 1000} s; use Refresh in Overview)`);
+          break;
+        }
+        if (!told) this.log('sys', 'no reply yet; the device may still be starting (a bridge surveys the channels for about 12 s)');
+        told = true;
+      }
     }
+    this.starting = false;
     this.emit('state');
   }
 
   async disconnect() {
     if (!this.open) return;
     this.open = false;
+    this.starting = false;
     try { await this.reader?.cancel(); } catch { /* already closed */ }
     try { await this.writer?.close(); } catch { /* already closed */ }
     try { await this.writeClosed; } catch { /* ignore */ }
@@ -94,6 +115,7 @@ export class Device extends EventTarget {
   // The device was unplugged (navigator.serial "disconnect")
   gone() {
     this.open = false;
+    this.starting = false;  // opened, but "info" has not been answered yet
     this.attached = false;
     this.failAll('unplugged');
     this.emit('state');

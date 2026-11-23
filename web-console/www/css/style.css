@@ -8,6 +8,7 @@
  ver. history
 
  - 2026/11/22 : Start Writing
+ - 2026/11/23 : Notice for a device that is still starting
 
 */
 :root {
@@ -150,6 +151,7 @@ summary { cursor: pointer; color: var(--muted); }
 .client-dialog::backdrop { background: rgba(0, 0, 0, .35); }
 .client-dialog header h2 { margin: 0; }
 .dev.closed .dev-name { font-weight: 500; }
+.dev-wait { font-size: 12px; margin: 4px 0 2px; color: var(--warn); }
 .dev-hint { font-size: 12px; margin: 2px 0; word-break: break-all; }
 button.link { border: 0; background: none; color: var(--accent); padding: 0 4px; font-size: 12px; text-decoration: underline; }
 

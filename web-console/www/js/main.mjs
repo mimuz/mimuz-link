@@ -15,6 +15,7 @@
  - 2026/11/22 : No names remembered per USB ID; a closed bridge port is named only from Web MIDI
  - 2026/11/22 : Keep no device history: ports allowed in earlier visits are forgotten, unplugged ones leave the list
  - 2026/11/22 : Remove the names from Web MIDI (they cannot be matched to ports once several bridges are attached)
+ - 2026/11/23 : Show that a device is still starting
 
 */
 // Lists the serial ports this page may use (several bridges and clients can be attached), connects to them and sends
@@ -128,7 +129,10 @@ function renderList() {
   for (const d of shown) {
     const i = d.info ?? {};
     // Before it is opened, a client's USB port is shown as a client from its USB IDs (the ESP32-C6's built-in USB)
-    const kind = !d.open && d.kind === 'unknown' && kindOfUsb(d.usb) === 'client' ? 'client' : d.kind;
+    // While it is still starting (no reply to "info" yet), the kind is taken from its USB IDs
+    const waiting = d.open && d.starting && !d.info;
+    const usbKind = kindOfUsb(d.usb);
+    const kind = d.kind === 'unknown' && ((!d.open && usbKind === 'client') || (waiting && usbKind !== 'unknown')) ? usbKind : d.kind;
     const title = d.open && i.label ? `${i.label} (${d.name})` : d.name;
     const hint = null;
     ul.append(el('li', { class: `dev ${state.selected === d ? 'sel' : ''} ${d.open ? '' : 'closed'}`, onclick: () => select(d) },
@@ -137,8 +141,9 @@ function renderList() {
         el('span', { class: `dot ${d.open ? (d.busy ? 'busy' : 'on') : 'off'}`, title: d.open ? 'connected' : 'not connected' })),
       el('div', { class: 'dev-name' }, title),
       hint,
+      waiting ? el('div', { class: 'dev-wait' }, 'Starting… waiting for a reply (a bridge surveys the channels for about 12 s)') : null,
       el('div', { class: 'dev-sub muted' },
-        d.open ? [i.fw ? `fw ${i.fw}` : '', i.radio_channel ? ` · ch ${i.radio_channel}` : '',
+        waiting ? '' : d.open ? [i.fw ? `fw ${i.fw}` : '', i.radio_channel ? ` · ch ${i.radio_channel}` : '',
           i.kind === 'bridge' ? ` · ${i.ports_used}/${i.ports} ports` : '',
           i.kind === 'client' ? ` · ${i.transport}${i.port ? ` port ${i.port}` : ''}` : ''].join('') : 'not connected'),
       el('div', { class: 'dev-actions' },
@@ -196,7 +201,9 @@ function overview(d, body) {
   const st = status();
   const box = el('div');
   const show = () => {
-    clear(box).append(kv(d.info ?? {}));
+    clear(box).append(d.starting && !d.info
+      ? el('p', { class: 'dev-wait' }, 'Starting… waiting for a reply. A bridge surveys the channels for about 12 s after it starts (for example right after a firmware update).')
+      : kv(d.info ?? {}));
   };
   show();
   const btn = el('button', {}, 'Refresh');

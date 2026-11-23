@@ -9,6 +9,7 @@
 
  - 2026/11/22 : Start Writing
  - 2026/11/22 : Load ESP Web Tools from unpkg (fixed version)
+ - 2026/11/23 : Say that the bridge needs about 15 s after writing
 
 */
 // Writes the bridge and client firmware built by firmware/build.sh (www/firmware/<name>/manifest.json) with
@@ -28,7 +29,7 @@ const FIRMWARE = [
       'Disconnect the bridge in the Console page (and close the PC tools that use it).',
       'Press "Restart into update mode" and choose the bridge\'s serial port. The bridge restarts and shows up again as a new port.',
       'Press "Write firmware" and choose the new port (USB JTAG/serial debug unit).',
-      'When it is done, the bridge restarts with the new firmware. Its registrations, channel and settings are kept.',
+      'When it is done, the bridge restarts with the new firmware and is ready after about 15 s (it surveys the channels first). Its registrations and settings are kept; the channel may change.',
     ],
     updateMode: true,
   },
