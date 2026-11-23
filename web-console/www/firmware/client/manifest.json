@@ -1,8 +1,8 @@
 {
   "name": "mimuz-link client test device (XIAO ESP32-C6)",
-  "version": "0.1.1",
-  "rev": "87a1929",
-  "built": "2026-11-23T11:54:07+0900",
+  "version": "0.1.2",
+  "rev": "e93c41e",
+  "built": "2026-11-23T13:48:13+0900",
   "app_size": 1361664,
   "new_install_prompt_erase": false,
   "new_install_improv_wait_time": 0,
