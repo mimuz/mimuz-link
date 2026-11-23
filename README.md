@@ -9,6 +9,8 @@ Clients (XIAO ESP32-C6, used as controllers or sound modules) connect over ESP-N
 - Delivery: Note Off messages are resent if they are not delivered. Note On messages that have waited too long are dropped.
 - Configuration: one-line commands over USB serial. Settings are stored in non-volatile memory.
 
+> **Note: esp32 Arduino core 3.3.8 only.** mimuz-link uses parts of the esp32 core and ESP-IDF that are not public API, so it works only with the version it was verified on, **esp32 core 3.3.8**. Other cores (older ones, and 3.3.9 and later including 4.x) are not supported, and the build stops with an error on them. Install the verified core from the official package index with `arduino-cli core install esp32:esp32@3.3.8` (in the Arduino IDE: Boards Manager → esp32 by Espressif Systems → version 3.3.8), and do not upgrade it while you use mimuz-link. See [Build and upload](#build-and-upload-arduino-cli-esp32-core-338).
+
 ## Layout
 
 The communication part (library) is kept separate from the device-specific part (applications).
