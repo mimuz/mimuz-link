@@ -8,6 +8,7 @@
  ver. history
 
  - 2026/11/23 : Start Writing
+ - 2026/11/23 : Model "basic" (lets applications find this kind of client)
 
 */
 // The smallest mimuz-link client. Runs on a bare board (no external wiring):
@@ -80,6 +81,7 @@ void setup() {
   led(false);
 
   mlink::Config cfg;  // defaults: device name "mi:muz:conESP32C6-<unique ID>", pairs with a bridge on first start
+  cfg.model = "basic";  // what kind of device this is: applications find clients of this kind by it
   mlink::onMidi(onMidi);
   mlink::Transport tr = mlink::begin(cfg);
   Serial.printf("basic: ready (%s)\n", tr == mlink::TR_BLE ? "BLE-MIDI" : "ESP-NOW");

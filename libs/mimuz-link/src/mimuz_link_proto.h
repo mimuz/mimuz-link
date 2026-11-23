@@ -12,6 +12,7 @@
  - 2026/11/22 : Set the radio retry limit (enm_retry_set)
  - 2026/11/22 : Client label (PKT_LABEL)
  - 2026/11/23 : Stop the build on an esp32 core other than the verified one (MIMUZ_LINK_ALLOW_UNTESTED_CORE)
+ - 2026/11/23 : Client model (what kind of device a client is), sent with the label
 
 */
 // mimuz-link: protocol definitions (shared by client and bridge)
@@ -82,20 +83,29 @@
 //   An ESP-NOW client's device name shows nowhere else on the PC, so it travels with the label.
 //   The client sends PKT_LABEL after every connect and whenever the label changes: the 12-byte header (4th byte =
 //   label length), the label (not terminated; 0 characters = none), then 1 byte = device name length and the device
-//   name (not terminated, up to ENM_DEVNAME_MAX). Bridges that do not know PKT_LABEL ignore it.
+//   name (not terminated, up to ENM_DEVNAME_MAX), then 1 byte = model length and the model (not terminated, up to
+//   ENM_MODEL_MAX). Bridges that do not know PKT_LABEL ignore it; older bridges ignore the model, and older clients
+//   leave out the device name or the model.
 //   The bridge can also ask for it with PKT_LABEL_REQ; the client then sends PKT_LABEL. The bridge asks by itself
 //   when it has not received a label some time after a client connected, and on the "label_request" command.
+// Client model:
+//   What kind of device a client is (e.g. "knob4"), fixed by its sketch (Config::model), so that applications can find
+//   the clients their device drivers are written for. Up to ENM_MODEL_MAX characters of the same set as the label;
+//   empty = not given. The device name cannot carry it: its prefix is shared by all clients and its length is limited.
 #define ENM_LABEL_MAX 30
 #define ENM_DEVNAME_MAX 31
-static inline bool enm_label_valid(const char *s) {
+#define ENM_MODEL_MAX 16
+static inline bool enm_name_valid(const char *s, size_t max) {
   size_t n = 0;
   for (; s[n]; n++) {
     char c = s[n];
-    if (n >= ENM_LABEL_MAX) return false;
+    if (n >= max) return false;
     if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) return false;
   }
   return true;
 }
+static inline bool enm_label_valid(const char *s) { return enm_name_valid(s, ENM_LABEL_MAX); }
+static inline bool enm_model_valid(const char *s) { return enm_name_valid(s, ENM_MODEL_MAX); }
 // Distribution by receive channel:
 //   The bridge is treated as "one MIDI cable that everyone is connected to". Each receiving C6 announces which MIDI channels it listens to.
 //   - The C6 sends its listen-channel mask on every connect (CONNECT seq) and whenever it changes (PKT_SUBSCRIBE aux).
@@ -167,7 +177,7 @@ enum : uint8_t {
   PKT_SUBSCRIBE = 18,  // C6 -> S3        : aux = listen-channel mask (16 bit), len = flags (ENM_SUB_*)
   PKT_CMD = 19,        // S3 -> C6        : relayed config command (one line of text)
   PKT_CMD_REPLY = 20,  // C6 -> S3        : its reply (one line of text)
-  PKT_LABEL = 21,      // C6 -> S3        : the client's label and device name (see "Client label")
+  PKT_LABEL = 21,      // C6 -> S3        : the client's label, device name and model (see "Client label")
   PKT_LABEL_REQ = 22,  // S3 -> C6        : asks the client to send its label (PKT_LABEL)
 };
 

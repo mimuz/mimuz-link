@@ -12,6 +12,7 @@
  - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit)
  - 2026/11/22 : The BLE-MIDI send task takes its priority from Config::txTaskPriority like the ESP-NOW one (was fixed at 9)
  - 2026/11/22 : Client label saved on the client and told to the bridge (get/set label)
+ - 2026/11/23 : Client model (Config::model) told to the bridge with the label; shown by info and get model
 
 */
 // mimuz-link: communication layer for the client side (XIAO ESP32-C6, etc.)
@@ -27,7 +28,7 @@
 //   - Reading switches and encoders, LEDs, sound generation, interpreting MIDI messages, test messages
 //
 // Usage (from a sketch):
-//   mlink::Config cfg;                    // set namePrefix or repair if needed
+//   mlink::Config cfg;                    // set model (what kind of device this is), namePrefix or repair if needed
 //   mlink::onMidi(handler);               // received MIDI (called from the receive task)
 //   mlink::begin(cfg);                    // once in setup()
 //   mlink::sendMidi(status, d1, d2);      // callable from any task
@@ -65,6 +66,8 @@ enum BootRequest { BOOT_AUTO, BOOT_BLE, BOOT_REPAIR };  // passed to restart(): 
 
 struct Config {
   const char *namePrefix = "mi:muz:conESP32C6";  // device name = prefix + "-" + unique ID (11 chars)
+  const char *model = "";                        // what kind of device this is (e.g. "knob4"; up to 16 of A-Z a-z 0-9 - _ .),
+                                                 // so that applications can find it; told to the bridge with the label
   bool repair = false;                           // true: erase the registration and pair again (e.g. booted with a switch held down)
   uint8_t txTaskPriority = 11;                   // priority of the send task (ESP-NOW and BLE-MIDI)
   uint8_t rxTaskPriority = 10;                   // priority of the task that hands received MIDI to the app
@@ -691,6 +694,7 @@ static void pingTask(void *) {
 // ================= BLE-MIDI =================
 static char devName[32];
 static char devUid[12];
+static char devModel[ENM_MODEL_MAX + 1] = "";  // Config::model (empty when not given or not valid)
 static BLECharacteristic *bleChr;
 static volatile bool bleConn = false;
 #define BLE_REPROBE_MS 20000          // while waiting on BLE, search for the bridge again at this interval
@@ -1018,8 +1022,8 @@ static void cmdPrintSettings(Print &o) {
 }
 static void cmdExec(const Cmd &c, Print &o) {
   if (cmdIs(c, "info")) {
-    o.printf("@%s ok name=%s kind=client fw=%s transport=%s connected=%d port=%d radio_channel=%u bridge=%02X:%02X:%02X:%02X:%02X:%02X label=%s\n", c.id,
-             devName, MIMUZ_LINK_VERSION, mode == MODE_ESPNOW ? "espnow" : "ble", (int)isConnected(), myPort + 1, bridgeCh, peerMac[0],
+    o.printf("@%s ok name=%s kind=client model=%s fw=%s transport=%s connected=%d port=%d radio_channel=%u bridge=%02X:%02X:%02X:%02X:%02X:%02X label=%s\n", c.id,
+             devName, devModel, MIMUZ_LINK_VERSION, mode == MODE_ESPNOW ? "espnow" : "ble", (int)isConnected(), myPort + 1, bridgeCh, peerMac[0],
              peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5], label);
   } else if (cmdIs(c, "get")) {
     if (c.argc == 1) {
@@ -1031,6 +1035,7 @@ static void cmdExec(const Cmd &c, Print &o) {
     else if (!strcmp(c.argv[1], "phy_rate")) o.printf("@%s ok phy_rate=%u\n", c.id, rateIdx);
     else if (!strcmp(c.argv[1], "send_lock")) o.printf("@%s ok send_lock=%u\n", c.id, enmSendLock ? 1 : 0);
     else if (!strcmp(c.argv[1], "label")) o.printf("@%s ok label=%s\n", c.id, label);
+    else if (!strcmp(c.argv[1], "model")) o.printf("@%s ok model=%s\n", c.id, devModel);  // fixed by the sketch (read only)
     else if (!strcmp(c.argv[1], "retry_limit"))
       o.printf("@%s ok retry_limit=%u short=%u long=%u default_short=%u default_long=%u\n", c.id, retryLimit, enm_retry_short(),
                enm_retry_long(), enmRetryDefShort, enmRetryDefLong);
@@ -1119,6 +1124,8 @@ static Transport begin(const Config &cfg) {
   enm_make_uid(devUid);
   snprintf(devName, sizeof(devName), "%s-%s", cfg.namePrefix, devUid);
   Serial.printf("\n%s\n", devName);
+  if (cfg.model && enm_model_valid(cfg.model)) strlcpy(devModel, cfg.model, sizeof(devModel));
+  else Serial.printf("model \"%s\" ignored (up to %d of A-Z a-z 0-9 - _ .)\n", cfg.model ? cfg.model : "", ENM_MODEL_MAX);
   // The transport is chosen automatically: ESP-NOW if the bridge is reachable, otherwise BLE (fixed to BLE after restart(BOOT_BLE))
   mode = req == BOOTREQ_BLE ? MODE_BLE : decideTransport(repair);
   bleForced = req == BOOTREQ_BLE;
@@ -1171,18 +1178,25 @@ static void loop() {
         cmdAfter();
       }
     }
-    // A new connection or a changed label -> tell the bridge (kept pending if the radio refused it)
+    // A new connection or a changed label -> tell the bridge the label, device name and model (kept pending if the
+    // radio refused it)
     if (labelDirty && connected) {
-      uint8_t lb[ENM_HDR_LEN + ENM_LABEL_MAX + 1 + ENM_DEVNAME_MAX];
+      uint8_t lb[ENM_HDR_LEN + ENM_LABEL_MAX + 1 + ENM_DEVNAME_MAX + 1 + ENM_MODEL_MAX];
       enm_pkt_t h;
       enm_init(h, PKT_LABEL);
-      size_t n = strlen(label), dn = strnlen(devName, ENM_DEVNAME_MAX);
+      size_t n = strlen(label), dn = strnlen(devName, ENM_DEVNAME_MAX), mn = strlen(devModel);
       h.len = (uint8_t)n;
       memcpy(lb, &h, ENM_HDR_LEN);
-      memcpy(lb + ENM_HDR_LEN, label, n);
-      lb[ENM_HDR_LEN + n] = (uint8_t)dn;
-      memcpy(lb + ENM_HDR_LEN + n + 1, devName, dn);
-      if (enmSendRaw(lb, ENM_HDR_LEN + n + 1 + dn) == ESP_OK) labelDirty = false;
+      size_t at = ENM_HDR_LEN;
+      memcpy(lb + at, label, n);
+      at += n;
+      lb[at++] = (uint8_t)dn;
+      memcpy(lb + at, devName, dn);
+      at += dn;
+      lb[at++] = (uint8_t)mn;
+      memcpy(lb + at, devModel, mn);
+      at += mn;
+      if (enmSendRaw(lb, at) == ESP_OK) labelDirty = false;
     }
     // Listen channels changed -> tell the bridge
     if (subDirty) {

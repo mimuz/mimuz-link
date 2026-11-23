@@ -20,6 +20,8 @@
  - 2026/11/22 : Keep the last label and device name of each registered client with the registration
  - 2026/11/23 : Answer the mimuz-link SysEx inquiries (port and bridge) on USB-MIDI
  - 2026/11/23 : Config commands over SysEx (cmd 03), so the bridge and its clients can be set up over USB-MIDI
+ - 2026/11/23 : Client model (PKT_LABEL) in the port list, the registry and the SysEx port reply (format version 2)
+ - 2026/11/23 : Tell the PC by itself (SysEx port reply) when a port's client connects, leaves or tells its label
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -177,6 +179,12 @@ struct RegMeta {
   char name[ENM_DEVNAME_MAX + 1];
 };
 static RegMeta regMeta[REG_MAX];
+// Last model each registered client told, kept apart from RegMeta so that registrations saved by older firmware keep
+// their labels and names
+struct RegModel {
+  char model[ENM_MODEL_MAX + 1];
+};
+static RegModel regModel[REG_MAX];
 static uint8_t regCount = 0, regNext = 0;
 static volatile bool regDirty = false;
 
@@ -191,6 +199,7 @@ static void regAdd(const uint8_t *mac) {
   regNext = (idx + 1) % REG_MAX;
   memcpy(regMac[idx], mac, 6);
   memset(&regMeta[idx], 0, sizeof(RegMeta));
+  memset(&regModel[idx], 0, sizeof(RegModel));
   regDirty = true;  // saved in loop() (do not write non-volatile memory inside the receive callback)
 }
 static void regLoad() {
@@ -200,18 +209,22 @@ static void regLoad() {
   if (regCount) prefs.getBytes("mac", regMac, regCount * 6);
   memset(regMeta, 0, sizeof(regMeta));
   if (regCount && prefs.getBytesLength("meta") == regCount * sizeof(RegMeta)) prefs.getBytes("meta", regMeta, regCount * sizeof(RegMeta));
+  memset(regModel, 0, sizeof(regModel));
+  if (regCount && prefs.getBytesLength("model") == regCount * sizeof(RegModel)) prefs.getBytes("model", regModel, regCount * sizeof(RegModel));
   for (int i = 0; i < regCount; i++) {  // keep them terminated whatever was stored
     regMeta[i].label[ENM_LABEL_MAX] = 0;
     regMeta[i].name[ENM_DEVNAME_MAX] = 0;
+    regModel[i].model[ENM_MODEL_MAX] = 0;
   }
 }
 // Remember what a registered client told about itself; saved in loop() when it changed
-static void regSetMeta(const uint8_t *mac, const char *label, const char *name) {
+static void regSetMeta(const uint8_t *mac, const char *label, const char *name, const char *model) {
   int r = regFind(mac);
   if (r < 0) return;
-  if (!strcmp(regMeta[r].label, label) && (!name || !strcmp(regMeta[r].name, name))) return;
+  if (!strcmp(regMeta[r].label, label) && (!name || !strcmp(regMeta[r].name, name)) && (!model || !strcmp(regModel[r].model, model))) return;
   strlcpy(regMeta[r].label, label, sizeof(regMeta[r].label));
   if (name) strlcpy(regMeta[r].name, name, sizeof(regMeta[r].name));
+  if (model) strlcpy(regModel[r].model, model, sizeof(regModel[r].model));
   regDirty = true;
 }
 static void regSave() {
@@ -220,9 +233,11 @@ static void regSave() {
   if (regCount) {
     prefs.putBytes("mac", regMac, regCount * 6);
     prefs.putBytes("meta", regMeta, regCount * sizeof(RegMeta));
+    prefs.putBytes("model", regModel, regCount * sizeof(RegModel));
   } else {
     prefs.remove("mac");
     prefs.remove("meta");
+    prefs.remove("model");
   }
 }
 
@@ -242,6 +257,7 @@ struct Port {
   volatile uint8_t subFlags;    // ENM_SUB_SELF = also receive its own messages (for testing)
   char label[ENM_LABEL_MAX + 1];  // the client's label (PKT_LABEL), empty until it tells it
   char devName[ENM_DEVNAME_MAX + 1];  // the client's device name (PKT_LABEL), empty until it tells it
+  char model[ENM_MODEL_MAX + 1];  // the client's model (PKT_LABEL), empty until it tells it or when it has none
   bool labelKnown;                // a PKT_LABEL arrived on this connection (an empty label counts too)
   uint32_t labelReqMs;            // when the label was last asked for (PKT_LABEL_REQ)
   uint8_t labelReqN;              // times asked on this connection
@@ -269,6 +285,7 @@ static bool addPeer(const uint8_t *mac) {
   pi.ifidx = WIFI_IF_STA;
   return esp_now_add_peer(&pi) == ESP_OK;
 }
+static void sxNotifyPort(int port);  // tells the PC that a port's client changed (see the SysEx section)
 // Ports held for the clients that were connected before a restart caused by a stalled radio, so that each comes back on
 // the same port number (and the computer keeps routing it to the same place)
 #define PORT_KEEP_MS 30000
@@ -299,6 +316,7 @@ static int portAssign(const uint8_t *mac, uint8_t rate) {
     ports[i].subFlags = 0;
     ports[i].label[0] = 0;
     ports[i].devName[0] = 0;
+    ports[i].model[0] = 0;
     ports[i].labelKnown = false;
     ports[i].labelReqMs = millis();
     ports[i].labelReqN = 0;
@@ -309,6 +327,7 @@ static int portAssign(const uint8_t *mac, uint8_t rate) {
     ports[i].lastRxMs = millis();
     ports[i].active = true;
     evlog("port %d <- " MACSTR_ " (connected)", i + 1, MAC2STR_(mac));
+    sxNotifyPort(i);
   }
   if (rate < ENM_RATE_NUM) {
     ports[i].rate = rate;
@@ -321,6 +340,7 @@ static void portFree(int i, const char *why) {
   ports[i].active = false;
   esp_now_del_peer(ports[i].mac);
   evlog("port %d freed (%s) " MACSTR_, i + 1, why, MAC2STR_(ports[i].mac));
+  sxNotifyPort(i);
 }
 
 // Registration and reject replies go to MACs not yet added as peers; add them temporarily to send
@@ -654,6 +674,7 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
       if (!enm_label_valid(buf)) break;
       if (strcmp(buf, ports[i].label)) evlog("port %d label: %s", i + 1, len ? buf : "(none)");
       strlcpy(ports[i].label, buf, sizeof(ports[i].label));
+      bool haveModel = false;
       if (n > ENM_HDR_LEN + len) {  // device name (absent from older clients)
         uint8_t dn = d[ENM_HDR_LEN + len];
         if (dn <= ENM_DEVNAME_MAX && n >= ENM_HDR_LEN + len + 1 + dn) {
@@ -663,10 +684,24 @@ static void MLINK_HOT onRecv(const esp_now_recv_info_t *info, const uint8_t *d, 
           for (uint8_t k = 0; k < dn; k++)
             if (nm[k] <= ' ' || nm[k] > '~') nm[k] = '_';  // keep the key=value replies intact
           strlcpy(ports[i].devName, nm, sizeof(ports[i].devName));
+          int at = ENM_HDR_LEN + len + 1 + dn;
+          if (n > at) {  // model (absent from older clients)
+            uint8_t mn = d[at];
+            char md[ENM_MODEL_MAX + 1];
+            if (mn <= ENM_MODEL_MAX && n >= at + 1 + mn) {
+              memcpy(md, d + at + 1, mn);
+              md[mn] = 0;
+              if (enm_model_valid(md)) {
+                strlcpy(ports[i].model, md, sizeof(ports[i].model));
+                haveModel = true;
+              }
+            }
+          }
         }
       }
-      regSetMeta(src, ports[i].label, ports[i].devName[0] ? ports[i].devName : nullptr);
+      regSetMeta(src, ports[i].label, ports[i].devName[0] ? ports[i].devName : nullptr, haveModel ? ports[i].model : nullptr);
       ports[i].labelKnown = true;
+      sxNotifyPort(i);
       break;
     }
     case PKT_CFG:
@@ -708,8 +743,11 @@ static bool MLINK_HOT usbWrite(uint8_t port, const uint8_t *m, uint8_t len) {
 // The bridge answers these itself, on the port (cable) the inquiry came in on. They are never sent over the radio.
 //   inquiry : F0 7D 4D 4C <cmd> F7          (7D = non-commercial manufacturer ID, 4D 4C = "ML" = mimuz-link)
 //   reply   : F0 7D 4D 4C <cmd|0x40> <format version> <data...> F7
-//   cmd 01 (port)  : reply 41 <ver> <port 1-8> <state> <client device name> <client label>
+//   cmd 01 (port)  : reply 41 <ver> <port 1-8> <state> <client device name> <client label> <client model>
 //                    state 0 = no client, 1 = connected (name and label not told yet), 2 = connected, name and label known
+//                    (the model is in format version 2 and later). After the PC has sent any of these inquiries, the
+//                    bridge also sends this reply by itself, on the port concerned, whenever a client connects to or
+//                    leaves that port or tells its label, so that the PC does not need to ask again and again.
 //   cmd 02 (bridge): reply 42 <ver> <bridge device name> <firmware version> <radio channel> <ports in use> <ports>
 //   cmd 03 (config command): inquiry 03 <command line> (the same text as on the serial, e.g. "@7 port 2 get label"; the
 //                    leading "@" may be left out); each reply line comes as 43 <more> <text> (no line end). more = 1:
@@ -718,7 +756,7 @@ static bool MLINK_HOT usbWrite(uint8_t port, const uint8_t *m, uint8_t len) {
 //                    ("port <n> ...") are answered the same way. Commands run in loop(), like serial ones.
 // Strings are <length> <ASCII characters> (no terminator). Other SysEx messages are ignored.
 #define ENM_SX_MAX (6 + MIMUZ_LINK_CMD_MAX)  // longest SysEx assembled from USB (longer ones are ignored)
-#define ENM_SX_FORMAT 1     // format version in the replies
+#define ENM_SX_FORMAT 2     // format version in the replies (2: the port reply carries the model; port changes are told)
 #define ENM_SX_LINE_MAX 240  // text in one reply message of cmd 03
 #define ENM_SX_LINES 8       // reply messages waiting to be written to USB
 static const uint8_t ENM_SX_HEAD[] = {0xF0, 0x7D, 0x4D, 0x4C};
@@ -741,7 +779,10 @@ struct SxBuf {
   bool on, over;
 };
 static SxBuf sxBuf[NUM_PORTS];  // used by usbInTask only
-static volatile uint32_t sxAnswered, sxIgnored, sxCmds;
+static volatile uint32_t sxAnswered, sxIgnored, sxCmds, sxNotified;
+// Port changes are told only after the PC has shown that it speaks this protocol (any inquiry since start), so that
+// MIDI programs that never ask are not sent SysEx they do not expect
+static volatile bool sxNotifyOn = false;
 
 // Feeds the bytes of one USB-MIDI SysEx packet (CIN 4-7). Returns the command of a complete inquiry, or 0.
 // For cmd 03 the message stays in sxBuf[port] (d[5..len-2] is the command line).
@@ -782,14 +823,17 @@ static uint8_t sxPutStr(uint8_t *o, uint8_t at, const char *str, uint8_t maxLen)
 }
 
 // Writes one complete SysEx message to USB-MIDI as consecutive packets (called from fwdTask only, so nothing else from
-// the radio is written in between)
-static bool usbWriteSysEx(uint8_t port, const uint8_t *d, uint16_t len) {
+// the radio is written in between). noWait: give up at once if even the first packet does not fit (a message the PC
+// did not ask for must not hold up MIDI from the radio when nobody reads the port); once started, a message is always
+// finished so that the PC never gets half of one.
+static bool usbWriteSysEx(uint8_t port, const uint8_t *d, uint16_t len, bool noWait = false) {
   for (uint16_t i = 0; i < len; i += 3) {
     uint8_t n = len - i < 3 ? len - i : 3;
     bool last = i + n >= len;
     uint8_t cin = !last ? 0x4 : n == 1 ? 0x5 : n == 2 ? 0x6 : 0x7;
     uint8_t pk[4] = {(uint8_t)((port << 4) | cin), d[i], (uint8_t)(n > 1 ? d[i + 1] : 0), (uint8_t)(n > 2 ? d[i + 2] : 0)};
     bool ok = tud_midi_packet_write(pk);
+    if (!ok && noWait && i == 0) return false;
     for (int k = 0; !ok && k < 50 && tud_mounted(); k++) {
       vTaskDelay(1);
       ok = tud_midi_packet_write(pk);
@@ -799,8 +843,9 @@ static bool usbWriteSysEx(uint8_t port, const uint8_t *d, uint16_t len) {
   return true;
 }
 
-static void sxAnswer(uint8_t port, uint8_t cmd) {
-  uint8_t o[4 + 2 + 3 + 2 * (ENM_DEVNAME_MAX + 1) + 8];
+// Answers an inquiry (or, notify = true, tells a port change by itself; see sxNotifyPort)
+static void sxAnswer(uint8_t port, uint8_t cmd, bool notify = false) {
+  uint8_t o[4 + 2 + 2 + (ENM_DEVNAME_MAX + 1) + (ENM_LABEL_MAX + 1) + (ENM_MODEL_MAX + 1) + 1];
   uint8_t n = 0;
   memcpy(o, ENM_SX_HEAD, 4);
   n = 4;
@@ -808,17 +853,19 @@ static void sxAnswer(uint8_t port, uint8_t cmd) {
   o[n++] = ENM_SX_FORMAT;
   if (cmd == ENM_SX_PORT) {
     const Port &pt = ports[port];
-    char name[ENM_DEVNAME_MAX + 1] = "", label[ENM_LABEL_MAX + 1] = "";
+    char name[ENM_DEVNAME_MAX + 1] = "", label[ENM_LABEL_MAX + 1] = "", model[ENM_MODEL_MAX + 1] = "";
     uint8_t state = 0;
     if (pt.active) {
       state = pt.labelKnown ? 2 : 1;
       strlcpy(name, pt.devName, sizeof(name));
       strlcpy(label, pt.label, sizeof(label));
+      strlcpy(model, pt.model, sizeof(model));
     }
     o[n++] = port + 1;
     o[n++] = state;
     n = sxPutStr(o, n, name, ENM_DEVNAME_MAX);
     n = sxPutStr(o, n, label, ENM_LABEL_MAX);
+    n = sxPutStr(o, n, model, ENM_MODEL_MAX);
   } else {
     int used = 0;
     for (int i = 0; i < NUM_PORTS; i++) used += ports[i].active;
@@ -829,8 +876,10 @@ static void sxAnswer(uint8_t port, uint8_t cmd) {
     o[n++] = NUM_PORTS;
   }
   o[n++] = 0xF7;
-  if (usbWriteSysEx(port, o, n)) sxAnswered++;
-  else usbFail++;
+  if (usbWriteSysEx(port, o, n, notify)) {
+    if (notify) sxNotified++;
+    else sxAnswered++;
+  } else if (!notify) usbFail++;
 }
 
 // Writes reply message m[1] of cmd 03 (called from fwdTask)
@@ -893,6 +942,20 @@ private:
 };
 static SxPrint sxOut[NUM_PORTS];
 
+// Tells the PC by itself that the client on a port changed (connected, left, or told its label): the same message as
+// the port reply, written by fwdTask on that port. Never waits (called from the radio receive callback too); dropped if
+// the queue is full.
+static void sxNotifyPort(int port) {
+  if (!sxNotifyOn || !rxq || port < 0 || port >= NUM_PORTS) return;
+  RxItem q = {};
+  q.port = (uint8_t)port;
+  q.len = 0;
+  q.m[0] = ENM_SX_PORT;
+  q.m[1] = 1;  // told by itself, not asked
+  q.t_cb = now_us();
+  xQueueSend(rxq, &q, 0);
+}
+
 // ESP-NOW → USB-MIDI
 static void MLINK_HOT fwdTask(void *) {
   RxItem it;
@@ -900,7 +963,7 @@ static void MLINK_HOT fwdTask(void *) {
     if (xQueueReceive(rxq, &it, portMAX_DELAY) != pdTRUE) continue;
     if (it.len == 0) {  // not from the radio: SysEx to write, written here so nothing from the radio comes in between
       if (it.m[0] == ENM_SX_CMD) sxWriteLine(it.m[1]);
-      else sxAnswer(it.port, it.m[0]);
+      else sxAnswer(it.port, it.m[0], it.m[1] != 0);
       continue;
     }
     // If the USB send buffer (16 entries) is full, wait until there is room and write again (so batched arrivals do not overflow).
@@ -950,6 +1013,7 @@ static void MLINK_HOT usbInTask(void *) {
       // SysEx: only the mimuz-link inquiries are handled (answered by fwdTask); nothing of SysEx goes to the radio
       if (cin == 0x4 || cin == 0x6 || cin == 0x7 || (cin == 0x5 && pk[1] == 0xF7)) {
         uint8_t cmd = sxFeed(port, cin, pk + 1);
+        if (cmd) sxNotifyOn = true;
         if (cmd == ENM_SX_CMD) {  // config command: run in loop()
           SxCmd q;
           q.port = port;
@@ -1690,8 +1754,8 @@ static void printStats(Print &o) {
                 (unsigned long)retryAccepted, (unsigned long)retryDup, (unsigned long)cbTypeUnknown);
   o.printf("NoteOn max age=%ums expired=%lu (PC->C6)\n", noteOnMaxAgeMs, (unsigned long)noteOnExpired);
   o.printf("bus (C6->C6): routed=%lu dropped=%lu\n", (unsigned long)busRouted, (unsigned long)busDrop);
-  o.printf("SysEx inquiries: answered=%lu commands=%lu ignored=%lu\n", (unsigned long)sxAnswered, (unsigned long)sxCmds,
-           (unsigned long)sxIgnored);
+  o.printf("SysEx inquiries: answered=%lu commands=%lu ignored=%lu port_changes_told=%lu\n", (unsigned long)sxAnswered,
+           (unsigned long)sxCmds, (unsigned long)sxIgnored, (unsigned long)sxNotified);
   o.printf("tx task work: %.2f us/packet (max %.1f us, packets=%lu)\n", twPackets ? (double)twCycles / twPackets / 240.0 : 0.0,
            twMaxCycles / 240.0, (unsigned long)twPackets);
   hQWake.print(o, "tx q->wake     ");
@@ -1938,9 +2002,9 @@ static void cmdExec(const Cmd &c, Print &o) {
     int cnt = 0;
     for (int i = 0; i < NUM_PORTS; i++) {
       if (!ports[i].active) continue;
-      o.printf("@%s + port=%d mac=" MACSTR_ " rx_channels=0x%04X phy_rate=%u idle_ms=%lu rssi=%d tx_fail=%lu label=%s name=%s\n", c.id,
+      o.printf("@%s + port=%d mac=" MACSTR_ " rx_channels=0x%04X phy_rate=%u idle_ms=%lu rssi=%d tx_fail=%lu label=%s name=%s model=%s\n", c.id,
                i + 1, MAC2STR_(ports[i].mac), ports[i].rxChMask, ports[i].rate, (unsigned long)(millis() - ports[i].lastRxMs), ports[i].rssi,
-               (unsigned long)ports[i].txFailCnt, ports[i].label, ports[i].devName);
+               (unsigned long)ports[i].txFailCnt, ports[i].label, ports[i].devName, ports[i].model);
       cnt++;
     }
     o.printf("@%s ok count=%d\n", c.id, cnt);
@@ -1962,8 +2026,8 @@ static void cmdExec(const Cmd &c, Print &o) {
     o.printf("@%s ok asked=%d\n", c.id, cnt);
   } else if (cmdIs(c, "registry")) {  // registered clients, one per line
     for (int i = 0; i < regCount; i++)
-      o.printf("@%s + mac=" MACSTR_ " port=%d label=%s name=%s\n", c.id, MAC2STR_(regMac[i]), portFind(regMac[i]) + 1, regMeta[i].label,
-               regMeta[i].name);
+      o.printf("@%s + mac=" MACSTR_ " port=%d label=%s name=%s model=%s\n", c.id, MAC2STR_(regMac[i]), portFind(regMac[i]) + 1, regMeta[i].label,
+               regMeta[i].name, regModel[i].model);
     o.printf("@%s ok count=%d\n", c.id, regCount);
   } else if (cmdIs(c, "unregister")) {  // unregister <mac|all>
     uint8_t mac[6];
@@ -1978,6 +2042,7 @@ static void cmdExec(const Cmd &c, Print &o) {
       if (pt >= 0) portFree(pt, "unregistered");
       memmove(regMac[r], regMac[r + 1], (regCount - r - 1) * 6);
       memmove(&regMeta[r], &regMeta[r + 1], (regCount - r - 1) * sizeof(RegMeta));
+      memmove(&regModel[r], &regModel[r + 1], (regCount - r - 1) * sizeof(RegModel));
       regCount--;
       if (regNext > regCount) regNext = 0;
       regSave();
