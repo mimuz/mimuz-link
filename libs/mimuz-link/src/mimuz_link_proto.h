@@ -50,7 +50,7 @@
 #define ENM_STALL_REINIT_AFTER 1
 #define ENM_STALL_REBOOT_AFTER 3
 #define ENM_STALL_HEAP_MIN 24000
-#define MIMUZ_LINK_VERSION "0.1.0"
+#define MIMUZ_LINK_VERSION "0.1.1"
 // Config command relay:
 //   The bridge forwards a config command received over serial to the client on the given port with PKT_CMD.
 //   The client executes the command and returns a single reply line with PKT_CMD_REPLY.
