@@ -1,6 +1,6 @@
 {
   "name": "mimuz-link-web-console",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Maintenance web console and firmware uploader for mimuz-link bridges and clients (Web Serial)",
   "private": true,
   "type": "module",
