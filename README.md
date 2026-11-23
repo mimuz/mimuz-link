@@ -23,6 +23,8 @@ libs/mimuz-link/               link layer (header-only Arduino library)
 test/mimuz-link-test/          test message definitions (not part of the link layer)
   src/mimuz_link_testproto.h
 examples/
+  client/basic/                smallest client: one button (Note On/Off) and one LED, no external wiring
+    basic.ino
   client/c6_test_device/       test client: bare C6 board (no external wiring)
     c6_test_device.ino           test message handling, sound-module stand-in, serial commands
     workload.h                   simulated controller workload (1 ms scan, switch, encoder simulation)
@@ -101,6 +103,10 @@ arduino-cli compile -u -p <port> --libraries ../../libs --libraries ../../test \
 cd examples/client
 arduino-cli compile -u -p <port> --libraries ../../libs --libraries ../../test \
   --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=huge_app c6_test_device
+
+# Smallest client example (same board settings; the test library is not needed)
+arduino-cli compile -u -p <port> --libraries ../../libs \
+  --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=huge_app basic
 ```
 
 - A brand-new XIAO ESP32-C6 does not start the firmware after its first upload until it is unplugged and plugged in again.
