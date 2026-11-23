@@ -1,8 +1,8 @@
 {
   "name": "mimuz-link bridge (XIAO ESP32-S3)",
   "version": "0.1.2",
-  "rev": "e93c41e",
-  "built": "2026-11-23T13:48:13+0900",
+  "rev": "708513c",
+  "built": "2026-11-23T13:52:38+0900",
   "app_size": 964672,
   "new_install_prompt_erase": false,
   "new_install_improv_wait_time": 0,
