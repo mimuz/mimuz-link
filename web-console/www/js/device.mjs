@@ -12,6 +12,7 @@
  - 2026/11/22 : Remove the USB key again (names are no longer remembered per USB ID)
  - 2026/11/23 : Keep asking "info" while the device is still starting
  - 2026/11/23 : Bridges on USB-MIDI (Web MIDI): the config commands go as SysEx (MidiBridge)
+ - 2026/11/23 : MidiBridge goes through the mimuz-link driver (drivers/mimuz-link.mjs)
 
 */
 // Config command protocol of mimuz-link over USB serial (see the README, "Config commands"):
@@ -23,10 +24,11 @@
 // Commands are sent one at a time per device: the bridge relays only one command to a client at a time, and the
 // replies are easier to tell apart.
 //
-// A bridge can also be reached over USB-MIDI (MidiBridge, Web MIDI with SysEx): the same command lines go in a SysEx
-// message and each reply line comes back in one (see the README, "SysEx inquiries"):
-//   PC -> bridge : F0 7D 4D 4C 03 <"@<id> <command> <args...>"> F7
-//   bridge -> PC : F0 7D 4D 4C 43 <more> <reply line> F7     (more = 1: the line continues in the next message)
+// A bridge can also be reached over USB-MIDI (MidiBridge): the mimuz-link driver (drivers/mimuz-link.mjs) sends the
+// same command lines as SysEx and matches the replies.
+import { parseFields } from '../drivers/mimuz-link.mjs';
+
+export { parseFields };
 
 const BAUD = 115200;
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -34,22 +36,6 @@ const DEFAULT_TIMEOUT_MS = 3000;
 // "info" is asked again until this long after the port was opened.
 const START_WAIT_MS = 25000;
 const START_RETRY_TIMEOUT_MS = 2000;
-
-// Keys whose values are names, never numbers (a label "007" must stay "007")
-const TEXT_KEYS = new Set(['label', 'name', 'mac', 'bridge', 'fw']);
-
-// "a=1 b=x" -> { a: 1, b: 'x' } (numbers become numbers, everything else stays a string)
-export function parseFields(text) {
-  const out = {};
-  for (const tok of text.trim().split(/\s+/)) {
-    const i = tok.indexOf('=');
-    if (i <= 0) continue;
-    const k = tok.slice(0, i);
-    const v = tok.slice(i + 1);
-    out[k] = !TEXT_KEYS.has(k) && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v;
-  }
-  return out;
-}
 
 export class Device extends EventTarget {
   constructor(port) {
@@ -253,31 +239,25 @@ export class Device extends EventTarget {
   emit(type, detail = {}) { this.dispatchEvent(new CustomEvent(type, { detail })); }
 }
 
-const SX_HEAD = [0xF0, 0x7D, 0x4D, 0x4C];
-const SX_CMD = 0x03;
-const SX_CMD_REPLY = 0x43;
-
-// A bridge on USB-MIDI. midiName = the name its MIDI ports share (without " Port n"); output / input = its Port 1.
-// Commands and replies are the same as on the serial; only the transport differs. There is no device log and no
-// one-character test command here (those exist only on the serial).
+// A bridge on USB-MIDI, reached through the mimuz-link driver (bridge = its Bridge). Commands and replies are the same
+// as on the serial; only the transport differs. There is no device log and no one-character test command here (those
+// exist only on the serial). The console shows the command lines the driver exchanges with the bridge.
 export class MidiBridge extends Device {
-  constructor(midiName, output, input) {
+  constructor(bridge) {
     super(null);
     this.transport = 'midi';
-    this.midiName = midiName;
-    this.output = output;
-    this.input = input;
-    this.partial = '';
-    this.onMessage = (e) => this.onMidi(e.data);
+    this.bridge = bridge;
+    this.midiName = bridge.key;
+    this.onBridgeLine = (e) => this.log(e.detail.dir, e.detail.text);
+    this.onBridgeBusy = () => this.setBusy(bridge.busy);
   }
 
-  get name() { return this.info?.name ?? this.midiName; }
+  get name() { return this.info?.name ?? this.bridge.name; }
 
   async connect() {
     if (this.open) return;
-    await this.output.open();
-    await this.input.open();
-    this.input.addEventListener('midimessage', this.onMessage);
+    this.bridge.addEventListener('line', this.onBridgeLine);
+    this.bridge.addEventListener('busy', this.onBridgeBusy);
     this.open = true;
     this.attached = true;
     await this.askInfo();
@@ -287,39 +267,25 @@ export class MidiBridge extends Device {
     if (!this.open) return;
     this.open = false;
     this.starting = false;
-    this.input.removeEventListener('midimessage', this.onMessage);
-    this.failAll('disconnected');
+    this.unlisten();
+    this.setBusy(false);
     this.emit('state');
   }
 
   // The bridge's MIDI ports went away (unplugged)
   gone() {
-    if (this.open) this.input.removeEventListener('midimessage', this.onMessage);
+    this.unlisten();
     super.gone();
   }
 
-  onMidi(d) {
-    if (d.length < 7 || d[0] !== 0xF0 || d[4] !== SX_CMD_REPLY || d[d.length - 1] !== 0xF7) return;
-    for (let i = 1; i < 4; i++) if (d[i] !== SX_HEAD[i]) return;
-    this.partial += String.fromCharCode(...d.subarray(6, d.length - 1));
-    if (d[5]) return;  // continues in the next message
-    const line = this.partial;
-    this.partial = '';
-    if (line) this.onLine(line);
+  unlisten() {
+    this.bridge.removeEventListener('line', this.onBridgeLine);
+    this.bridge.removeEventListener('busy', this.onBridgeBusy);
   }
 
-  async write(text) {
-    if (!this.open) throw new Error('not connected');
-    const line = text.replace(/\n$/, '');
-    this.log('out', line);
-    const bytes = [...SX_HEAD, SX_CMD];
-    for (const ch of line) {
-      const c = ch.charCodeAt(0);
-      if (c > 0x7E || c < 0x20) throw new Error('only ASCII characters can be sent');
-      bytes.push(c);
-    }
-    bytes.push(0xF7);
-    this.output.send(bytes);
+  command(text, opt) {
+    if (!this.open) return Promise.resolve({ ok: false, error: 'not connected', items: [], text: '' });
+    return this.bridge.command(text, opt);
   }
 
   async raw() { throw new Error('only on the serial port (Load device)'); }

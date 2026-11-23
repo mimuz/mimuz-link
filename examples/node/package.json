@@ -1,0 +1,15 @@
+{
+  "name": "mimuz-link-node-examples",
+  "version": "0.0.0",
+  "description": "mimuz-link web driver on Node.js (examples)",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@julusian/midi": "3.8.1"
+  },
+  "author": "D.F.Mac. @TripArts Music",
+  "license": "MIT"
+}

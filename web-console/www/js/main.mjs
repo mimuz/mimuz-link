@@ -17,16 +17,18 @@
  - 2026/11/22 : Remove the names from Web MIDI (they cannot be matched to ports once several bridges are attached)
  - 2026/11/23 : Show that a device is still starting
  - 2026/11/23 : Bridges on USB-MIDI are found and connected by themselves (Web MIDI, config commands as SysEx)
+ - 2026/11/23 : Bridges come from the mimuz-link driver; the clients list follows the ports the bridge reports; model
 
 */
-// Bridges and their clients are set up over USB-MIDI: the page finds the bridges among the MIDI ports (Web MIDI, by
-// their fixed name prefix), connects to them by itself and sends the config commands as SysEx. Clients reached over
+// Bridges and their clients are set up over USB-MIDI: the mimuz-link driver (drivers/mimuz-link.mjs) finds the
+// bridges among the MIDI ports, the page connects to them by itself, and the driver sends the config commands as SysEx. Clients reached over
 // the radio are configured through their bridge ("port <n> ...").
 // "Load device" opens a serial port instead (Web Serial): a client attached over USB, or a bridge when its log or the
 // test firmware's one-character commands are needed. Only one program can have a serial port open at a time, so close
 // it here before using the PC tools (soak_test.py, mlink_config.py, ...) on the same device, and the other way round.
+import MimuzLink from '../drivers/mimuz-link.mjs';
 import { Device, MidiBridge, RelayTarget } from './device.mjs';
-import { BRIDGE_SETTINGS, CLIENT_SETTINGS, LABEL_PATTERN, NAME_PREFIX, PHY_RATES, UID_LEN, kindOfUsb, toCommand, toForm } from './settings.mjs';
+import { BRIDGE_SETTINGS, CLIENT_SETTINGS, LABEL_PATTERN, PHY_RATES, kindOfUsb, toCommand, toForm } from './settings.mjs';
 import { busy, clear, el, fmtTime, status, table } from './dom.mjs';
 
 const LOG_MAX = 2000;
@@ -36,6 +38,7 @@ const state = {
   tab: new Map(),    // device -> tab name
   logs: new Map(),   // device -> [{ dir, text, time }]
   timer: null,       // auto refresh of the clients list
+  unwatch: null,     // stops refreshing the clients list on the bridge's port changes
 };
 
 const $ = (id) => document.getElementById(id);
@@ -87,61 +90,36 @@ async function connect(d) {
   }
 }
 
-// ---- bridges on USB-MIDI ----
+// ---- bridges on USB-MIDI (through the mimuz-link driver) ----
 
-let midi = null;
+let link = null;
 
-// "<prefix><uid>" of the bridge a MIDI port belongs to ("mi:muz:bridgeESPS3-QEwFK6XO000 Port 1" -> "mi:muz:bridgeESPS3-QEwFK6XO000")
-function bridgeKey(portName) {
-  const i = portName.indexOf(NAME_PREFIX.bridge);
-  return i < 0 ? null : portName.slice(i, i + NAME_PREFIX.bridge.length + UID_LEN);
-}
-
-// The port to talk to: "Port 1" if the names say so, otherwise the first by name
-function firstPort(ports) {
-  return ports.find((p) => /port 1$/i.test(p.name)) ?? ports.sort((a, b) => a.name.localeCompare(b.name))[0];
-}
-
-function scanMidi() {
-  if (!midi) return;
-  const outs = new Map();
-  const ins = new Map();
-  for (const p of midi.outputs.values()) { const k = bridgeKey(p.name); if (k && p.state === 'connected') (outs.get(k) ?? outs.set(k, []).get(k)).push(p); }
-  for (const p of midi.inputs.values()) { const k = bridgeKey(p.name); if (k && p.state === 'connected') (ins.get(k) ?? ins.set(k, []).get(k)).push(p); }
-  // gone
+// Follows the driver's list of bridges: a new bridge is listed and connected, a bridge that went away leaves the list
+function syncBridges() {
+  const bridges = link.bridges;
   for (const d of state.devices.filter((x) => x.transport === 'midi')) {
-    if (!outs.has(d.midiName) || !ins.has(d.midiName)) {
-      d.gone();
-      removeDevice(d);
-    }
+    if (bridges.includes(d.bridge)) continue;
+    d.gone();
+    removeDevice(d);
   }
-  // new
-  for (const [k, o] of outs) {
-    const i = ins.get(k);
-    if (!i || state.devices.some((x) => x.transport === 'midi' && x.midiName === k)) continue;
-    const out = firstPort(o);
-    const inp = i.find((p) => p.name === out.name) ?? firstPort(i);
-    const d = addDevice(new MidiBridge(k, out, inp));
+  for (const b of bridges) {
+    if (state.devices.some((x) => x.transport === 'midi' && x.bridge === b)) continue;
+    const d = addDevice(new MidiBridge(b));
     if (!state.selected) select(d);
     connect(d);
   }
 }
 
 async function initMidi() {
-  if (!navigator.requestMIDIAccess) {
-    $('midi-note').textContent = 'This browser has no Web MIDI: bridges can only be loaded as serial ports.';
-    return;
-  }
-  try {
-    midi = await navigator.requestMIDIAccess({ sysex: true });
-  } catch (e) {
-    $('midi-note').textContent = `MIDI (with SysEx) was not allowed (${e.message}): bridges can only be loaded as serial ports. Allow MIDI for this site and reload.`;
+  const l = new MimuzLink();
+  link = await l.init();
+  if (!link) {
+    $('midi-note').textContent = `${l.error} Bridges can only be loaded as serial ports. Allow MIDI for this site and reload.`;
     return;
   }
   $('midi-note').textContent = '';
-  let t = null;
-  midi.addEventListener('statechange', () => { clearTimeout(t); t = setTimeout(scanMidi, 300); });  // ports come and go one by one
-  scanMidi();
+  link.addEventListener('change', syncBridges);
+  syncBridges();
 }
 
 async function init() {
@@ -305,6 +283,7 @@ function clients(d, body) {
     clear(portsBox).append(table([
       { key: 'port', label: 'Port' },
       { key: 'label', label: 'Label', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
+      { key: 'model', label: 'Model', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
       { key: 'name', label: 'Device name', class: 'small', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
       { key: 'mac', label: 'MAC' },
       { key: 'rssi', label: 'RSSI [dBm]', fmt: (v) => el('span', { class: rssiClass(v) }, v) },
@@ -317,6 +296,7 @@ function clients(d, body) {
     if (!g.ok) throw new Error(g.error);
     clear(regBox).append(table([
       { key: 'label', label: 'Label', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
+      { key: 'model', label: 'Model', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
       { key: 'name', label: 'Device name', class: 'small', fmt: (v) => v || el('span', { class: 'muted' }, '—') },
       { key: 'mac', label: 'MAC' },
       { key: 'port', label: 'Port', fmt: (v) => (v > 0 ? v : el('span', { class: 'muted' }, 'not connected')) },
@@ -341,10 +321,19 @@ function clients(d, body) {
     if (auto.checked) state.timer = setInterval(() => { if (!d.busy) busy(btn, st, refresh); }, 5000);
   };
   auto.onchange = setAuto;
+  // A bridge on USB-MIDI tells when a client connects, leaves or tells its label: refresh then (once for a burst)
+  if (d.bridge) {
+    let t = null;
+    const onChange = () => { clearTimeout(t); t = setTimeout(() => { if (!d.busy) busy(btn, st, refresh); }, 300); };
+    d.bridge.addEventListener('change', onChange);
+    state.unwatch = () => { clearTimeout(t); d.bridge.removeEventListener('change', onChange); };
+  }
   body.append(
     el('div', { class: 'row' }, btn, ask, el('label', {}, auto, ' refresh every 5 s'), st),
     el('h3', {}, 'Connected clients'),
-    el('p', { class: 'muted' }, 'Click a client to read or change its settings over the radio.'),
+    el('p', { class: 'muted' }, d.bridge
+      ? 'The list follows the clients as they connect and leave. Click a client to read or change its settings over the radio.'
+      : 'Click a client to read or change its settings over the radio.'),
     portsBox,
     el('h3', {}, 'Registered clients'),
     el('p', { class: 'muted' }, 'A client must be registered (paired) before it can connect. Pairing: bring the client close to the bridge and start it without a registration. Label and device name are the last ones the client told this bridge.'),
@@ -363,6 +352,8 @@ async function unregister(d, mac, st, refresh) {
 function stopAuto() {
   if (state.timer) clearInterval(state.timer);
   state.timer = null;
+  state.unwatch?.();
+  state.unwatch = null;
 }
 
 function rssiClass(v) { return v >= -65 ? 'good' : v >= -80 ? 'fair' : 'poor'; }
@@ -392,7 +383,7 @@ function openClient(bridge, row) {
   });
   dlg.append(
     el('header', { class: 'row' }, el('h2', {}, `Port ${row.port} · ${row.label || row.mac}`), el('span', { class: 'grow' }), close),
-    el('p', { class: 'muted' }, [row.name, row.mac].filter(Boolean).join(' · ')),
+    el('p', { class: 'muted' }, [row.model && `model ${row.model}`, row.name, row.mac].filter(Boolean).join(' · ')),
     el('p', { class: 'muted' }, 'Commands are relayed by the bridge over the radio (resent until a reply arrives, error after 1.5 s).'),
     el('div', { class: 'row' }, btn, st), infoBox,
     el('h3', {}, 'Settings'), settingsForm(target, CLIENT_SETTINGS),

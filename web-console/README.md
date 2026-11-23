@@ -5,14 +5,16 @@ bridges and a client) can be listed and used at the same time.
 
 - Finds the bridges on USB-MIDI by itself, connects to them and shows what each one is (`info`). Clients attached
   over USB (and, when needed, a bridge's serial port) are added with **Load device**.
-- Bridge: connected and registered clients (signal strength, undelivered count), settings and actions of a client over
+- Bridge: connected and registered clients (model, signal strength, undelivered count; the list follows the clients as
+  they connect and leave), settings and actions of a client over
   the radio (`port <n> …`), radio channel survey and channel change, settings, diagnostics (statistics, trace, late
   radio sends, radio restarts).
 - Client attached over USB: settings and actions (restart, BLE-MIDI, unpair, reset).
 - Console: every line to and from the device, and free config commands (the `@id` is added automatically).
 
-The page talks to the devices itself: to bridges over **USB-MIDI** (Web MIDI with SysEx: the config commands go as
-SysEx, see the top README, "SysEx inquiries"), and to serial ports through **Web Serial** (Chrome or Edge). Setting up
+The page talks to the devices itself: to bridges over **USB-MIDI** through the web driver
+`www/drivers/mimuz-link.mjs` (Web MIDI with SysEx: the config commands go as SysEx, see the top README, "SysEx
+inquiries" and "Web driver"; applications use the same driver), and to serial ports through **Web Serial** (Chrome or Edge). Setting up
 the system goes through the bridges over USB-MIDI, including the clients on the radio; Web Serial is for a client set
 up on its own over USB, for a bridge's log, and for the firmware uploader. The server only hosts the files in `www/`.
 Web MIDI with SysEx and Web Serial need a secure context, and `http://localhost` is one, so the server listens on the
@@ -69,4 +71,5 @@ the merged image is not used because it covers the whole flash.
 - Commands are sent one at a time per device. A command relayed to a client over the radio is resent by the bridge
   until a reply arrives and fails after 1.5 s.
 - Settings marked ● are saved by the device; ○ last until it restarts (diagnostic).
-- Everything is written as ES modules (`app.mjs`, `www/js/*.mjs`).
+- Everything is written as ES modules (`app.mjs`, `www/js/*.mjs`, `www/drivers/*.mjs`). `www/drivers/` holds the
+  drivers for applications (`mimuz-link.mjs`, and device drivers on top of it); the console uses them too.
