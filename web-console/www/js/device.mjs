@@ -11,6 +11,7 @@
  - 2026/11/22 : USB key of a port (to remember which device it was)
  - 2026/11/22 : Remove the USB key again (names are no longer remembered per USB ID)
  - 2026/11/23 : Keep asking "info" while the device is still starting
+ - 2026/11/23 : Bridges on USB-MIDI (Web MIDI): the config commands go as SysEx (MidiBridge)
 
 */
 // Config command protocol of mimuz-link over USB serial (see the README, "Config commands"):
@@ -21,6 +22,11 @@
 // opened with DTR off.
 // Commands are sent one at a time per device: the bridge relays only one command to a client at a time, and the
 // replies are easier to tell apart.
+//
+// A bridge can also be reached over USB-MIDI (MidiBridge, Web MIDI with SysEx): the same command lines go in a SysEx
+// message and each reply line comes back in one (see the README, "SysEx inquiries"):
+//   PC -> bridge : F0 7D 4D 4C 03 <"@<id> <command> <args...>"> F7
+//   bridge -> PC : F0 7D 4D 4C 43 <more> <reply line> F7     (more = 1: the line continues in the next message)
 
 const BAUD = 115200;
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -49,12 +55,13 @@ export class Device extends EventTarget {
   constructor(port) {
     super();
     this.port = port;
-    const info = port.getInfo();
+    this.transport = 'serial';
+    const info = port?.getInfo() ?? {};
     this.usb = { vid: info.usbVendorId, pid: info.usbProductId, serial: info.usbSerialNumber };
     this.info = null;     // reply of "info" (name, kind, fw, ...)
     this.open = false;
     this.starting = false;  // opened, but "info" has not been answered yet
-    this.attached = port.connected !== false;  // plugged in (Web Serial lists ports the page was allowed to use, plugged in or not)
+    this.attached = port?.connected !== false;  // plugged in (Web Serial lists ports the page was allowed to use, plugged in or not)
     this.busy = false;
     this.nextId = 1;
     this.queue = [];
@@ -76,6 +83,11 @@ export class Device extends EventTarget {
     this.writeClosed = enc.readable.pipeTo(this.port.writable).catch(() => {});
     this.writer = enc.writable.getWriter();
     this.readLoop();
+    await this.askInfo();
+  }
+
+  // Asks "info" until it is answered or START_WAIT_MS has passed since the device was opened
+  async askInfo() {
     this.starting = true;
     this.emit('state');
     const until = Date.now() + START_WAIT_MS;
@@ -239,6 +251,78 @@ export class Device extends EventTarget {
 
   log(dir, text) { this.emit('line', { dir, text, time: new Date() }); }
   emit(type, detail = {}) { this.dispatchEvent(new CustomEvent(type, { detail })); }
+}
+
+const SX_HEAD = [0xF0, 0x7D, 0x4D, 0x4C];
+const SX_CMD = 0x03;
+const SX_CMD_REPLY = 0x43;
+
+// A bridge on USB-MIDI. midiName = the name its MIDI ports share (without " Port n"); output / input = its Port 1.
+// Commands and replies are the same as on the serial; only the transport differs. There is no device log and no
+// one-character test command here (those exist only on the serial).
+export class MidiBridge extends Device {
+  constructor(midiName, output, input) {
+    super(null);
+    this.transport = 'midi';
+    this.midiName = midiName;
+    this.output = output;
+    this.input = input;
+    this.partial = '';
+    this.onMessage = (e) => this.onMidi(e.data);
+  }
+
+  get name() { return this.info?.name ?? this.midiName; }
+
+  async connect() {
+    if (this.open) return;
+    await this.output.open();
+    await this.input.open();
+    this.input.addEventListener('midimessage', this.onMessage);
+    this.open = true;
+    this.attached = true;
+    await this.askInfo();
+  }
+
+  async disconnect() {
+    if (!this.open) return;
+    this.open = false;
+    this.starting = false;
+    this.input.removeEventListener('midimessage', this.onMessage);
+    this.failAll('disconnected');
+    this.emit('state');
+  }
+
+  // The bridge's MIDI ports went away (unplugged)
+  gone() {
+    if (this.open) this.input.removeEventListener('midimessage', this.onMessage);
+    super.gone();
+  }
+
+  onMidi(d) {
+    if (d.length < 7 || d[0] !== 0xF0 || d[4] !== SX_CMD_REPLY || d[d.length - 1] !== 0xF7) return;
+    for (let i = 1; i < 4; i++) if (d[i] !== SX_HEAD[i]) return;
+    this.partial += String.fromCharCode(...d.subarray(6, d.length - 1));
+    if (d[5]) return;  // continues in the next message
+    const line = this.partial;
+    this.partial = '';
+    if (line) this.onLine(line);
+  }
+
+  async write(text) {
+    if (!this.open) throw new Error('not connected');
+    const line = text.replace(/\n$/, '');
+    this.log('out', line);
+    const bytes = [...SX_HEAD, SX_CMD];
+    for (const ch of line) {
+      const c = ch.charCodeAt(0);
+      if (c > 0x7E || c < 0x20) throw new Error('only ASCII characters can be sent');
+      bytes.push(c);
+    }
+    bytes.push(0xF7);
+    this.output.send(bytes);
+  }
+
+  async raw() { throw new Error('only on the serial port (Load device)'); }
 }
 
 // A client reached through a bridge: commands are relayed with "port <n> ..." (single-line replies only)

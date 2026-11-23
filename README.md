@@ -47,7 +47,7 @@ examples/
 | Duplicates | drops packets that arrive twice because of radio-layer retries | the same |
 | Diagnostics | radio round-trip measurement, statistics | PING replies, statistics, logging |
 
-Carried messages: channel messages and channel-less messages (clock, start, stop, song position, and so on). SysEx is not carried.
+Carried messages: channel messages and channel-less messages (clock, start, stop, song position, and so on). SysEx is not carried; the bridge answers the mimuz-link SysEx inquiries itself (see "SysEx inquiries").
 
 The link layer handles each MIDI message on its own. It does not pair Note On with Note Off and does not track which notes are sounding.
 
@@ -163,6 +163,25 @@ Open the port with DTR on (the C6 resets if the port is opened with DTR off; the
 | bridge | key `tx_impl` | diagnostic: 0 = single-queue send task, 1 = per-client send task (default). For comparing both inside one firmware. Not saved |
 
 Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port> "command" …`
+
+## SysEx inquiries (USB-MIDI, bridge)
+
+A PC application can ask the bridge, over USB-MIDI, which client is on a port and which bridge it is talking to, and can send it any config command (including those relayed to its clients), so the bridge and its clients can be set up without the serial port. This is how the web console talks to bridges. The bridge answers on the port the inquiry was sent to. These messages are not sent over the radio; other SysEx messages are ignored.
+
+```
+inquiry : F0 7D 4D 4C <cmd> F7
+reply   : F0 7D 4D 4C <cmd + 0x40> <format version> <data ...> F7
+```
+
+`7D` is the manufacturer ID for non-commercial use; `4D 4C` ("ML") marks mimuz-link. Strings are a length byte followed by ASCII characters (no terminator). The format version is 1.
+
+| cmd | inquiry | reply data |
+|---|---|---|
+| `01` port | `F0 7D 4D 4C 01 F7` on port n | `41 01 <port 1-8> <state> <client device name> <client label>`. state: 0 = no client (both strings empty), 1 = connected, name and label not told yet, 2 = connected, name and label known |
+| `02` bridge | `F0 7D 4D 4C 02 F7` on any port | `42 01 <bridge device name> <firmware version> <radio channel> <ports in use> <ports>` |
+| `03` config command | `F0 7D 4D 4C 03 <command line> F7` on any port | one message per reply line: `43 <more> <text>` (no line end, no format version). The command line and the replies are the same text as on the serial (see "Config commands"), e.g. `@7 port 2 get label` → `@7 ok label=N1`; the leading `@` may be left out. more = 1: the line was longer than 240 characters and continues in the next message |
+
+Example: `F0 7D 4D 4C 41 01 01 02 1D "mi:muz:conESP32C6-j3f5__w9GK0" 02 "N1" F7` = port 1, client `mi:muz:conESP32C6-j3f5__w9GK0` with label `N1`.
 
 ## Serial commands (test firmware)
 

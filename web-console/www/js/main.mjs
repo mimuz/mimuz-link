@@ -16,14 +16,17 @@
  - 2026/11/22 : Keep no device history: ports allowed in earlier visits are forgotten, unplugged ones leave the list
  - 2026/11/22 : Remove the names from Web MIDI (they cannot be matched to ports once several bridges are attached)
  - 2026/11/23 : Show that a device is still starting
+ - 2026/11/23 : Bridges on USB-MIDI are found and connected by themselves (Web MIDI, config commands as SysEx)
 
 */
-// Lists the serial ports this page may use (several bridges and clients can be attached), connects to them and sends
-// config commands. Clients reached over the radio are configured through their bridge ("port <n> ...").
-// Only one program can have a serial port open at a time, so close the port here before using the PC tools
-// (soak_test.py, mlink_config.py, ...) on the same device, and the other way round.
-import { Device, RelayTarget } from './device.mjs';
-import { BRIDGE_SETTINGS, CLIENT_SETTINGS, LABEL_PATTERN, PHY_RATES, kindOfUsb, toCommand, toForm } from './settings.mjs';
+// Bridges and their clients are set up over USB-MIDI: the page finds the bridges among the MIDI ports (Web MIDI, by
+// their fixed name prefix), connects to them by itself and sends the config commands as SysEx. Clients reached over
+// the radio are configured through their bridge ("port <n> ...").
+// "Load device" opens a serial port instead (Web Serial): a client attached over USB, or a bridge when its log or the
+// test firmware's one-character commands are needed. Only one program can have a serial port open at a time, so close
+// it here before using the PC tools (soak_test.py, mlink_config.py, ...) on the same device, and the other way round.
+import { Device, MidiBridge, RelayTarget } from './device.mjs';
+import { BRIDGE_SETTINGS, CLIENT_SETTINGS, LABEL_PATTERN, NAME_PREFIX, PHY_RATES, UID_LEN, kindOfUsb, toCommand, toForm } from './settings.mjs';
 import { busy, clear, el, fmtTime, status, table } from './dom.mjs';
 
 const LOG_MAX = 2000;
@@ -53,9 +56,11 @@ function removeDevice(d) {
 }
 
 function addPort(port) {
-  let d = state.devices.find((x) => x.port === port);
-  if (d) return d;
-  d = new Device(port);
+  const d = state.devices.find((x) => x.port === port);
+  return d ?? addDevice(new Device(port));
+}
+
+function addDevice(d) {
   state.logs.set(d, []);
   d.addEventListener('line', (e) => {
     const l = state.logs.get(d);
@@ -82,10 +87,68 @@ async function connect(d) {
   }
 }
 
+// ---- bridges on USB-MIDI ----
+
+let midi = null;
+
+// "<prefix><uid>" of the bridge a MIDI port belongs to ("mi:muz:bridgeESPS3-QEwFK6XO000 Port 1" -> "mi:muz:bridgeESPS3-QEwFK6XO000")
+function bridgeKey(portName) {
+  const i = portName.indexOf(NAME_PREFIX.bridge);
+  return i < 0 ? null : portName.slice(i, i + NAME_PREFIX.bridge.length + UID_LEN);
+}
+
+// The port to talk to: "Port 1" if the names say so, otherwise the first by name
+function firstPort(ports) {
+  return ports.find((p) => /port 1$/i.test(p.name)) ?? ports.sort((a, b) => a.name.localeCompare(b.name))[0];
+}
+
+function scanMidi() {
+  if (!midi) return;
+  const outs = new Map();
+  const ins = new Map();
+  for (const p of midi.outputs.values()) { const k = bridgeKey(p.name); if (k && p.state === 'connected') (outs.get(k) ?? outs.set(k, []).get(k)).push(p); }
+  for (const p of midi.inputs.values()) { const k = bridgeKey(p.name); if (k && p.state === 'connected') (ins.get(k) ?? ins.set(k, []).get(k)).push(p); }
+  // gone
+  for (const d of state.devices.filter((x) => x.transport === 'midi')) {
+    if (!outs.has(d.midiName) || !ins.has(d.midiName)) {
+      d.gone();
+      removeDevice(d);
+    }
+  }
+  // new
+  for (const [k, o] of outs) {
+    const i = ins.get(k);
+    if (!i || state.devices.some((x) => x.transport === 'midi' && x.midiName === k)) continue;
+    const out = firstPort(o);
+    const inp = i.find((p) => p.name === out.name) ?? firstPort(i);
+    const d = addDevice(new MidiBridge(k, out, inp));
+    if (!state.selected) select(d);
+    connect(d);
+  }
+}
+
+async function initMidi() {
+  if (!navigator.requestMIDIAccess) {
+    $('midi-note').textContent = 'This browser has no Web MIDI: bridges can only be loaded as serial ports.';
+    return;
+  }
+  try {
+    midi = await navigator.requestMIDIAccess({ sysex: true });
+  } catch (e) {
+    $('midi-note').textContent = `MIDI (with SysEx) was not allowed (${e.message}): bridges can only be loaded as serial ports. Allow MIDI for this site and reload.`;
+    return;
+  }
+  $('midi-note').textContent = '';
+  let t = null;
+  midi.addEventListener('statechange', () => { clearTimeout(t); t = setTimeout(scanMidi, 300); });  // ports come and go one by one
+  scanMidi();
+}
+
 async function init() {
   if (!('serial' in navigator)) {
     $('unsupported').hidden = false;
     $('add').disabled = true;
+    initMidi();
     return;
   }
   $('add').addEventListener('click', async () => {
@@ -111,6 +174,7 @@ async function init() {
   });
   renderList();
   renderDetail();
+  initMidi();
 }
 
 // ---------------- device list ----------------
@@ -123,7 +187,7 @@ function renderList() {
     renderDetail();
   }
   if (!shown.length) {
-    ul.append(el('li', { class: 'muted' }, 'No devices yet. Use "Load device" and choose the serial port of a bridge or client.'));
+    ul.append(el('li', { class: 'muted' }, 'No devices yet. Bridges on USB-MIDI appear here by themselves; for a client attached over USB, use "Load device".'));
     return;
   }
   for (const d of shown) {
@@ -137,7 +201,8 @@ function renderList() {
     const hint = null;
     ul.append(el('li', { class: `dev ${state.selected === d ? 'sel' : ''} ${d.open ? '' : 'closed'}`, onclick: () => select(d) },
       el('div', { class: 'dev-head' },
-        el('span', { class: `badge ${kind}` }, kind),
+        el('span', {}, el('span', { class: `badge ${kind}` }, kind), ' ',
+          el('span', { class: 'badge via' }, d.transport === 'midi' ? 'MIDI' : 'serial')),
         el('span', { class: `dot ${d.open ? (d.busy ? 'busy' : 'on') : 'off'}`, title: d.open ? 'connected' : 'not connected' })),
       el('div', { class: 'dev-name' }, title),
       hint,
@@ -504,7 +569,7 @@ function clientActions(target, done) {
 function diag(d, body) {
   const st = status();
   const out = el('div');
-  const stats = el('button', {}, 'Statistics');
+  const stats = el('button', { disabled: d.transport === 'midi', title: d.transport === 'midi' ? 'Only on the serial port (Load device)' : null }, 'Statistics');
   stats.onclick = () => busy(stats, st, async () => {
     const lines = await d.raw('s', 1500);
     clear(out).append(el('pre', { class: 'log' }, lines.filter((l) => !l.startsWith('@')).join('\n') || '(no output)'));

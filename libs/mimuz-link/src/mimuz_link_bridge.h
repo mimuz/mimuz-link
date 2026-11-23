@@ -18,6 +18,8 @@
  - 2026/11/22 : Set how many times the radio retries an unacknowledged frame (retry_limit, 8 by default)
  - 2026/11/22 : Show the label and device name each client tells (PKT_LABEL) in the port list
  - 2026/11/22 : Keep the last label and device name of each registered client with the registration
+ - 2026/11/23 : Answer the mimuz-link SysEx inquiries (port and bridge) on USB-MIDI
+ - 2026/11/23 : Config commands over SysEx (cmd 03), so the bridge and its clients can be set up over USB-MIDI
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -489,6 +491,7 @@ struct LogItem {
 static char relayReply[ENM_CMD_TEXT_MAX + 1];
 static volatile bool relayReplyReady = false;
 static char relayId[16];             // ID of the command awaiting a reply (empty = not waiting)
+static Print *relayOut = &Serial;     // where the reply goes (serial, or SysEx on the port the command came in on)
 static uint32_t relayDeadline = 0;
 // Relay resend: until a reply arrives, resend the same packet (same sequence number and time) every RELAY_RESEND_MS.
 // The client does not run the same command twice (it identifies it by sequence number and time and returns the previous reply again)
@@ -701,11 +704,205 @@ static bool MLINK_HOT usbWrite(uint8_t port, const uint8_t *m, uint8_t len) {
   return tud_midi_packet_write(pk);
 }
 
+// ---- mimuz-link SysEx inquiries (USB-MIDI) ----
+// The bridge answers these itself, on the port (cable) the inquiry came in on. They are never sent over the radio.
+//   inquiry : F0 7D 4D 4C <cmd> F7          (7D = non-commercial manufacturer ID, 4D 4C = "ML" = mimuz-link)
+//   reply   : F0 7D 4D 4C <cmd|0x40> <format version> <data...> F7
+//   cmd 01 (port)  : reply 41 <ver> <port 1-8> <state> <client device name> <client label>
+//                    state 0 = no client, 1 = connected (name and label not told yet), 2 = connected, name and label known
+//   cmd 02 (bridge): reply 42 <ver> <bridge device name> <firmware version> <radio channel> <ports in use> <ports>
+//   cmd 03 (config command): inquiry 03 <command line> (the same text as on the serial, e.g. "@7 port 2 get label"; the
+//                    leading "@" may be left out); each reply line comes as 43 <more> <text> (no line end). more = 1:
+//                    the line was longer than ENM_SX_LINE_MAX and continues in the next message. The replies are the
+//                    same lines as on the serial ("@7 ok ...", "@7 + ...", "@7 err ..."); commands relayed to a client
+//                    ("port <n> ...") are answered the same way. Commands run in loop(), like serial ones.
+// Strings are <length> <ASCII characters> (no terminator). Other SysEx messages are ignored.
+#define ENM_SX_MAX (6 + MIMUZ_LINK_CMD_MAX)  // longest SysEx assembled from USB (longer ones are ignored)
+#define ENM_SX_FORMAT 1     // format version in the replies
+#define ENM_SX_LINE_MAX 240  // text in one reply message of cmd 03
+#define ENM_SX_LINES 8       // reply messages waiting to be written to USB
+static const uint8_t ENM_SX_HEAD[] = {0xF0, 0x7D, 0x4D, 0x4C};
+enum { ENM_SX_PORT = 0x01, ENM_SX_BRIDGE = 0x02, ENM_SX_CMD = 0x03, ENM_SX_REPLY = 0x40 };
+struct SxCmd {  // a config command from SysEx, run in loop()
+  uint8_t port;
+  char line[MIMUZ_LINK_CMD_MAX + 1];
+};
+static QueueHandle_t sxCmdq;
+struct SxLine {  // a reply message of cmd 03, filled in loop() and written to USB by fwdTask
+  volatile bool used;
+  uint8_t port, more;
+  uint16_t len;
+  char t[ENM_SX_LINE_MAX];
+};
+static SxLine sxLines[ENM_SX_LINES];
+struct SxBuf {
+  uint8_t d[ENM_SX_MAX];
+  uint8_t len;
+  bool on, over;
+};
+static SxBuf sxBuf[NUM_PORTS];  // used by usbInTask only
+static volatile uint32_t sxAnswered, sxIgnored, sxCmds;
+
+// Feeds the bytes of one USB-MIDI SysEx packet (CIN 4-7). Returns the command of a complete inquiry, or 0.
+// For cmd 03 the message stays in sxBuf[port] (d[5..len-2] is the command line).
+static uint8_t sxFeed(uint8_t port, uint8_t cin, const uint8_t *b) {
+  if (port >= NUM_PORTS) return 0;
+  SxBuf &x = sxBuf[port];
+  uint8_t n = cin == 0x5 ? 1 : cin == 0x6 ? 2 : 3;
+  for (uint8_t i = 0; i < n; i++) {
+    uint8_t c = b[i];
+    if (c == 0xF0) { x.on = true; x.over = false; x.len = 0; }
+    if (!x.on) continue;
+    if (x.len < ENM_SX_MAX) x.d[x.len++] = c;
+    else x.over = true;
+    if (c == 0xF7) {
+      x.on = false;
+      bool ok = !x.over && x.len >= 6 && memcmp(x.d, ENM_SX_HEAD, 4) == 0;
+      if (ok) {
+        if (x.d[4] == ENM_SX_PORT || x.d[4] == ENM_SX_BRIDGE) ok = x.len == 6;
+        else if (x.d[4] == ENM_SX_CMD) ok = x.len >= 7;
+        else ok = false;
+      }
+      if (!ok) {
+        sxIgnored++;
+        return 0;
+      }
+      return x.d[4];
+    }
+  }
+  return 0;
+}
+
+static uint8_t sxPutStr(uint8_t *o, uint8_t at, const char *str, uint8_t maxLen) {
+  uint8_t n = 0;
+  while (str[n] && n < maxLen) n++;
+  o[at++] = n;
+  for (uint8_t i = 0; i < n; i++) o[at++] = (uint8_t)str[i] & 0x7F;
+  return at;
+}
+
+// Writes one complete SysEx message to USB-MIDI as consecutive packets (called from fwdTask only, so nothing else from
+// the radio is written in between)
+static bool usbWriteSysEx(uint8_t port, const uint8_t *d, uint16_t len) {
+  for (uint16_t i = 0; i < len; i += 3) {
+    uint8_t n = len - i < 3 ? len - i : 3;
+    bool last = i + n >= len;
+    uint8_t cin = !last ? 0x4 : n == 1 ? 0x5 : n == 2 ? 0x6 : 0x7;
+    uint8_t pk[4] = {(uint8_t)((port << 4) | cin), d[i], (uint8_t)(n > 1 ? d[i + 1] : 0), (uint8_t)(n > 2 ? d[i + 2] : 0)};
+    bool ok = tud_midi_packet_write(pk);
+    for (int k = 0; !ok && k < 50 && tud_mounted(); k++) {
+      vTaskDelay(1);
+      ok = tud_midi_packet_write(pk);
+    }
+    if (!ok) return false;
+  }
+  return true;
+}
+
+static void sxAnswer(uint8_t port, uint8_t cmd) {
+  uint8_t o[4 + 2 + 3 + 2 * (ENM_DEVNAME_MAX + 1) + 8];
+  uint8_t n = 0;
+  memcpy(o, ENM_SX_HEAD, 4);
+  n = 4;
+  o[n++] = cmd | ENM_SX_REPLY;
+  o[n++] = ENM_SX_FORMAT;
+  if (cmd == ENM_SX_PORT) {
+    const Port &pt = ports[port];
+    char name[ENM_DEVNAME_MAX + 1] = "", label[ENM_LABEL_MAX + 1] = "";
+    uint8_t state = 0;
+    if (pt.active) {
+      state = pt.labelKnown ? 2 : 1;
+      strlcpy(name, pt.devName, sizeof(name));
+      strlcpy(label, pt.label, sizeof(label));
+    }
+    o[n++] = port + 1;
+    o[n++] = state;
+    n = sxPutStr(o, n, name, ENM_DEVNAME_MAX);
+    n = sxPutStr(o, n, label, ENM_LABEL_MAX);
+  } else {
+    int used = 0;
+    for (int i = 0; i < NUM_PORTS; i++) used += ports[i].active;
+    n = sxPutStr(o, n, usbProductName, ENM_DEVNAME_MAX);
+    n = sxPutStr(o, n, MIMUZ_LINK_VERSION, 15);
+    o[n++] = wifiChannel & 0x7F;
+    o[n++] = (uint8_t)used;
+    o[n++] = NUM_PORTS;
+  }
+  o[n++] = 0xF7;
+  if (usbWriteSysEx(port, o, n)) sxAnswered++;
+  else usbFail++;
+}
+
+// Writes reply message m[1] of cmd 03 (called from fwdTask)
+static void sxWriteLine(uint8_t slot) {
+  if (slot >= ENM_SX_LINES) return;
+  SxLine &l = sxLines[slot];
+  uint8_t o[4 + 2 + ENM_SX_LINE_MAX + 1];
+  memcpy(o, ENM_SX_HEAD, 4);
+  uint16_t n = 4;
+  o[n++] = ENM_SX_CMD | ENM_SX_REPLY;
+  o[n++] = l.more;
+  for (uint16_t i = 0; i < l.len; i++) o[n++] = (uint8_t)l.t[i] & 0x7F;
+  o[n++] = 0xF7;
+  if (!usbWriteSysEx(l.port, o, n)) usbFail++;
+  l.used = false;
+}
+
+// Print that sends what is written to it as cmd 03 reply messages, one per line, on one port (used in loop())
+class SxPrint : public Print {
+public:
+  uint8_t port = 0;
+  size_t write(uint8_t ch) override {
+    if (ch == '\r') return 1;
+    if (ch == '\n') { emit(0); return 1; }
+    buf[n++] = (char)ch;
+    if (n >= ENM_SX_LINE_MAX) emit(1);
+    return 1;
+  }
+  void flush() override { if (n) emit(0); }
+private:
+  char buf[ENM_SX_LINE_MAX];
+  uint16_t n = 0;
+  uint8_t next = 0;
+  void emit(uint8_t more) {
+    // Wait (up to about 200 ms) for a free message slot; fwdTask frees them as it writes to USB
+    int slot = -1;
+    for (int k = 0; k < 200 && slot < 0; k++) {
+      for (int j = 0; j < ENM_SX_LINES; j++) {
+        int i = (next + j) % ENM_SX_LINES;
+        if (!sxLines[i].used) { slot = i; break; }
+      }
+      if (slot < 0) vTaskDelay(1);
+    }
+    if (slot < 0) { n = 0; usbFail++; return; }
+    next = (slot + 1) % ENM_SX_LINES;
+    SxLine &l = sxLines[slot];
+    l.port = port;
+    l.more = more;
+    l.len = n;
+    memcpy(l.t, buf, n);
+    l.used = true;
+    n = 0;
+    RxItem q = {};
+    q.port = port;
+    q.len = 0;
+    q.m[0] = ENM_SX_CMD;
+    q.m[1] = (uint8_t)slot;
+    if (xQueueSend(rxq, &q, pdMS_TO_TICKS(50)) != pdTRUE) l.used = false;
+  }
+};
+static SxPrint sxOut[NUM_PORTS];
+
 // ESP-NOW → USB-MIDI
 static void MLINK_HOT fwdTask(void *) {
   RxItem it;
   for (;;) {
     if (xQueueReceive(rxq, &it, portMAX_DELAY) != pdTRUE) continue;
+    if (it.len == 0) {  // not from the radio: SysEx to write, written here so nothing from the radio comes in between
+      if (it.m[0] == ENM_SX_CMD) sxWriteLine(it.m[1]);
+      else sxAnswer(it.port, it.m[0]);
+      continue;
+    }
     // If the USB send buffer (16 entries) is full, wait until there is room and write again (so batched arrivals do not overflow).
     // Wait at most 50 ms in case the PC is not reading.
     bool ok = usbWrite(it.port, it.m, it.len);
@@ -750,7 +947,28 @@ static void MLINK_HOT usbInTask(void *) {
     while (tud_midi_packet_read(pk)) {
       uint8_t port = pk[0] >> 4;
       uint8_t cin = pk[0] & 0x0F;
-      if (cin == 0x4 || cin == 0x6 || cin == 0x7) continue;  // SysEx continuation and end are not handled
+      // SysEx: only the mimuz-link inquiries are handled (answered by fwdTask); nothing of SysEx goes to the radio
+      if (cin == 0x4 || cin == 0x6 || cin == 0x7 || (cin == 0x5 && pk[1] == 0xF7)) {
+        uint8_t cmd = sxFeed(port, cin, pk + 1);
+        if (cmd == ENM_SX_CMD) {  // config command: run in loop()
+          SxCmd q;
+          q.port = port;
+          const SxBuf &x = sxBuf[port];
+          uint16_t from = x.d[5] == '@' ? 6 : 5, len = x.len - 1 - from;
+          if (len > MIMUZ_LINK_CMD_MAX) len = MIMUZ_LINK_CMD_MAX;
+          memcpy(q.line, x.d + from, len);
+          q.line[len] = 0;
+          if (!len || !sxCmdq || xQueueSend(sxCmdq, &q, pdMS_TO_TICKS(10)) != pdTRUE) sxIgnored++;
+        } else if (cmd) {
+          RxItem q = {};
+          q.port = port;
+          q.len = 0;
+          q.m[0] = cmd;
+          q.t_cb = now_us();
+          if (xQueueSend(rxq, &q, pdMS_TO_TICKS(10)) != pdTRUE) sxIgnored++;
+        }
+        continue;
+      }
       uint8_t m[3] = {pk[1], pk[2], pk[3]};
       uint8_t L = midi_len(m[0]);
       if (!L) continue;  // SysEx etc. are not carried
@@ -1472,6 +1690,8 @@ static void printStats(Print &o) {
                 (unsigned long)retryAccepted, (unsigned long)retryDup, (unsigned long)cbTypeUnknown);
   o.printf("NoteOn max age=%ums expired=%lu (PC->C6)\n", noteOnMaxAgeMs, (unsigned long)noteOnExpired);
   o.printf("bus (C6->C6): routed=%lu dropped=%lu\n", (unsigned long)busRouted, (unsigned long)busDrop);
+  o.printf("SysEx inquiries: answered=%lu commands=%lu ignored=%lu\n", (unsigned long)sxAnswered, (unsigned long)sxCmds,
+           (unsigned long)sxIgnored);
   o.printf("tx task work: %.2f us/packet (max %.1f us, packets=%lu)\n", twPackets ? (double)twCycles / twPackets / 240.0 : 0.0,
            twMaxCycles / 240.0, (unsigned long)twPackets);
   hQWake.print(o, "tx q->wake     ");
@@ -1608,6 +1828,7 @@ static void cmdExec(const Cmd &c, Print &o) {
     memcpy(relayMac, ports[v - 1].mac, 6);
     if (enm_radio_send(relayMac, buf, relayLen) != ESP_OK) { cmdErr(c, o, "send_failed"); return; }
     strlcpy(relayId, c.id, sizeof(relayId));
+    relayOut = &o;
     relayLastSendMs = millis();
     relayDeadline = relayLastSendMs + RELAY_TIMEOUT_MS;  // the reply is printed in loop(). If none arrives, resend; if still none, timeout
   } else if (cmdIs(c, "info")) {
@@ -1793,7 +2014,8 @@ static void begin() {
   prefs.begin("enm", false);
   loadSettings();  // load saved settings (allowed radio channel range etc.)
 
-  rxq = xQueueCreate(192, sizeof(RxItem));  // large enough not to overflow even with consecutive batched arrivals (up to 64 messages)
+  rxq = xQueueCreate(192, sizeof(RxItem));
+  sxCmdq = xQueueCreate(4, sizeof(SxCmd));  // large enough not to overflow even with consecutive batched arrivals (up to 64 messages)
   logq = xQueueCreate(32, sizeof(LogItem));
   evlogq = xQueueCreate(16, sizeof(EvLog));
   txq = xQueueCreate(TXQ_LEN, sizeof(TxItem));
@@ -1841,14 +2063,32 @@ static void begin() {
 static void loop() {
   uint32_t ms = millis();
 
+  // Config commands that came over SysEx (cmd 03): run here like serial ones, replies go back as SysEx on the same port
+  SxCmd sc;
+  while (sxCmdq && xQueueReceive(sxCmdq, &sc, 0) == pdTRUE) {
+    SxPrint &o = sxOut[sc.port];
+    o.port = sc.port;
+    sxCmds++;
+    cmdRunLine(sc.line, o);
+    o.flush();
+    // let the reply reach USB before actions that run after it (cmdAfter)
+    for (int k = 0; k < 100; k++) {
+      bool busy = false;
+      for (int i = 0; i < ENM_SX_LINES; i++) busy |= sxLines[i].used;
+      if (!busy) break;
+      vTaskDelay(1);
+    }
+    cmdAfter();
+  }
+
   // Print replies to relayed configuration commands to serial (timeout if none arrives)
   if (relayId[0]) {
     if (relayReplyReady) {
-      Serial.println(relayReply);
+      relayOut->println(relayReply);
       relayReplyReady = false;
       relayId[0] = 0;
     } else if ((int32_t)(ms - relayDeadline) > 0) {
-      Serial.printf("@%s err timeout\n", relayId);
+      relayOut->printf("@%s err timeout\n", relayId);
       relayId[0] = 0;
     } else if (ms - relayLastSendMs >= RELAY_RESEND_MS) {  // no reply -> resend the same packet
       enm_radio_send(relayMac, relayBuf, relayLen);

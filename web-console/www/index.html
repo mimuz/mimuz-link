@@ -16,6 +16,7 @@
  - 2026/11/22 : "Add device" is now "Load device"
  - 2026/11/22 : Two pages: Console and Firmware uploader; "Load device" moves into the Console page
  - 2026/11/22 : Footer with the credits
+ - 2026/11/23 : Bridges on USB-MIDI appear by themselves; "Load device" is for serial ports
 
 -->
 <html lang="en">
@@ -34,13 +35,15 @@
     </nav>
   </header>
   <p id="unsupported" class="notice" hidden>
-    This browser has no Web Serial. Use Chrome or Edge, and open the page from http://localhost.
+    This browser has no Web Serial (needed for clients attached over USB and for the firmware uploader). Use Chrome or
+    Edge, and open the page from http://localhost.
   </p>
 
   <section id="page-console" class="page">
     <div class="toolbar">
-      <button id="add" class="primary">Load device</button>
-      <span class="muted small">Choose the serial port of a bridge or a client attached over USB.</span>
+      <button id="add">Load device (serial)</button>
+      <span class="muted small">Bridges on USB-MIDI appear by themselves. Use "Load device" for a client attached over USB
+        (or a bridge's serial port, for its log). <span id="midi-note"></span></span>
     </div>
     <div class="layout">
       <aside>
@@ -48,7 +51,7 @@
         <ul id="devices" class="devices"></ul>
         <p class="muted small">
           A serial port can be open in one program only: close it here before using the PC tools or the firmware
-          uploader on the same device.
+          uploader on the same device. MIDI ports can be shared.
         </p>
       </aside>
       <main id="detail"></main>
