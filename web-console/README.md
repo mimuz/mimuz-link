@@ -47,7 +47,7 @@ The **Firmware uploader** page writes the latest bridge and client firmware buil
 needs the internet).
 
 ```sh
-npm run build   # web-console/firmware/build.sh: builds both into www/firmware/<bridge|client>/ (kept in git)
+npm run build   # web-console/firmware/build.sh: builds them into www/firmware/<bridge|client|basic>/ (kept in git)
 ```
 
 Only the bootloader, the partition table, `boot_app0` and the application are written, at the offsets
@@ -58,7 +58,8 @@ the merged image is not used because it covers the whole flash.
   1200 baud restarts it into the ROM's download mode), then **Write firmware** and choose the new port
   ("USB JTAG/serial debug unit").
 - Client: attach it over USB, then **Write firmware** and choose its port.
-- The client firmware is the test device (`examples/client/c6_test_device`).
+- Two client firmwares are offered: the test device (`examples/client/c6_test_device`) and the basic example
+  (`examples/client/basic`: one button and one LED).
 
 ## Notes
 

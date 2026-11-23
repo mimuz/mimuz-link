@@ -10,8 +10,10 @@
 #  - 2026/11/22 : Start Writing
 #  - 2026/11/22 : Version from the top package.json (checked against the firmware); run by "npm run build"
 #  - 2026/11/22 : Record the source commit; quiet about the missing tag when run by release.sh
+#  - 2026/11/23 : Also the basic client example (www/firmware/basic)
 #
-# Builds the bridge (examples/bridge/s3_bridge) and the client (examples/client/c6_test_device) with arduino-cli and
+# Builds the bridge (examples/bridge/s3_bridge), the client test device (examples/client/c6_test_device, "client") and
+# the basic client example (examples/client/basic, "basic") with arduino-cli and
 # puts, for each, the bootloader, the partition table, boot_app0 and the application into www/firmware/<name>/ with
 # a manifest.json for ESP Web Tools. The parts are written at the same offsets as "arduino-cli upload"; the merged
 # image is not used because it covers the whole flash and would also overwrite the settings (NVS at 0x9000-0xDFFF:
@@ -89,4 +91,6 @@ build bridge "mimuz-link bridge (XIAO ESP32-S3)" "ESP32-S3" \
   "esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default" examples/bridge/s3_bridge
 build client "mimuz-link client test device (XIAO ESP32-C6)" "ESP32-C6" \
   "esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=huge_app" examples/client/c6_test_device
+build basic "mimuz-link client: basic example (XIAO ESP32-C6)" "ESP32-C6" \
+  "esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=huge_app" examples/client/basic
 echo "version $VERSION, rev $REV"

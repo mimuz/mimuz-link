@@ -10,6 +10,7 @@
  - 2026/11/22 : Start Writing
  - 2026/11/22 : Load ESP Web Tools from unpkg (fixed version)
  - 2026/11/23 : Say that the bridge needs about 15 s after writing
+ - 2026/11/23 : The basic client example as a third firmware
 
 */
 // Writes the bridge and client firmware built by firmware/build.sh (www/firmware/<name>/manifest.json) with
@@ -35,6 +36,17 @@ const FIRMWARE = [
   },
   {
     name: 'client', title: 'Client (test device firmware)', board: 'XIAO ESP32-C6',
+    steps: [
+      'Attach the client to this computer over USB (a client on battery has to be plugged in for this).',
+      'Disconnect it in the Console page if it is open there.',
+      'Press "Write firmware" and choose its port (USB JTAG/serial debug unit).',
+      'When it is done, the client restarts with the new firmware. Its pairing, label and settings are kept.',
+    ],
+    updateMode: false,
+  },
+  {
+    name: 'basic', title: 'Client (basic example)', board: 'XIAO ESP32-C6',
+    note: 'One button and one LED (examples/client/basic): the BOOT button sends Note On/Off, Note On/Off from the PC light the LED.',
     steps: [
       'Attach the client to this computer over USB (a client on battery has to be plugged in for this).',
       'Disconnect it in the Console page if it is open there.',
@@ -90,6 +102,7 @@ async function card(fw) {
     el('dt', {}, 'source'), el('dd', {}, m.rev ?? '?'),
     el('dt', {}, 'built'), el('dd', {}, m.built ? new Date(m.built).toLocaleString() : '?'),
     el('dt', {}, 'application'), el('dd', {}, m.app_size ? `${Math.round(m.app_size / 1024)} KB` : '?')));
+  if (fw.note) body.append(el('p', { class: 'muted small' }, fw.note));
   body.append(el('ol', { class: 'fw-steps' }, fw.steps.map((s) => el('li', {}, s))));
   const st = status();
   const row = el('div', { class: 'row wrap' });
