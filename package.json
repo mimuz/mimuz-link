@@ -1,6 +1,6 @@
 {
   "name": "mimuz-link",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MIDI over ESP-NOW link layer for mi:muz devices: library, examples, web console and firmware uploader",
   "private": true,
   "type": "module",
