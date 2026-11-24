@@ -22,6 +22,7 @@
  - 2026/11/23 : Config commands over SysEx (cmd 03), so the bridge and its clients can be set up over USB-MIDI
  - 2026/11/23 : Client model (PKT_LABEL) in the port list, the registry and the SysEx port reply (format version 2)
  - 2026/11/23 : Tell the PC by itself (SysEx port reply) when a port's client connects, leaves or tells its label
+ - 2026/11/24 : Chip temperature (internal sensor) in info and the statistics
 
 */
 // mimuz-link: communication part of the bridge (XIAO ESP32-S3)
@@ -56,6 +57,7 @@
 #include <esp_cpu.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <driver/temperature_sensor.h>
 #include <new>
 // Frequently executed code (send task, receive handling, USB forwarding, send-complete callback) is placed in internal fast memory (IRAM).
 // This bypasses the flash cache and shortens the round trip by about 0.15 ms.
@@ -153,6 +155,29 @@ namespace mlink {
 
 static inline uint32_t now_us() { return (uint32_t)esp_timer_get_time(); }
 static uint8_t wifiChannel = ENM_CHANNEL;
+
+// ---- Chip temperature ----
+// The ESP32-S3's internal sensor: the die, not the air around it. The test bridge read 65-77 C under load, close to the top of the
+// -10..80 C range the core's temperatureRead() sets up, so the sensor is started here for 20..100 C (error up to 2 C).
+// Started at the first reading; NAN if it could not be started.
+static float chipTempC() {
+  static temperature_sensor_handle_t ts = nullptr;
+  static bool failed = false;
+  if (!ts && !failed) {
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
+    if (temperature_sensor_install(&cfg, &ts) != ESP_OK) {
+      ts = nullptr;
+      failed = true;
+    } else if (temperature_sensor_enable(ts) != ESP_OK) {
+      temperature_sensor_uninstall(ts);
+      ts = nullptr;
+      failed = true;
+    }
+  }
+  float t = NAN;
+  if (!ts || temperature_sensor_get_celsius(ts, &t) != ESP_OK) return NAN;
+  return t;
+}
 
 // ---- Event log (queued from the receive callback etc., printed in loop()) ----
 struct EvLog { char s[96]; };
@@ -1769,10 +1794,11 @@ static void printStats(Print &o) {
   o.printf("radio stall: espnowRestarts=%lu wifiRestarts=%lu driverReinits=%lu stallReboots=%lu | duplicate packets dropped=%lu\n",
            (unsigned long)stallRestarts, (unsigned long)wifiRestarts, (unsigned long)driverReinits, (unsigned long)stallReboots,
            (unsigned long)rxPktDup);
-  o.printf("heap: free=%u min=%u largest=%u | internal free=%u min=%u largest=%u | uptime=%lus\n", (unsigned)esp_get_free_heap_size(),
-           (unsigned)esp_get_minimum_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned long)(millis() / 1000));
+  o.printf("heap: free=%u min=%u largest=%u | internal free=%u min=%u largest=%u | uptime=%lus | temp=%.1fC\n",
+           (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned long)(millis() / 1000), chipTempC());
   o.printf("tx done cb: midi=%lu other=%lu (last other type=%u) lateMidi=%lu (last late %.1fms) timeouts=%lu\n", (unsigned long)cbMidi,
                 (unsigned long)cbOther, cbLastOtherType, (unsigned long)cbLateMidi, cbLateUs / 1000.0, (unsigned long)txTimeouts);
   o.printf("C6->PC: usbRetry=%lu  ", (unsigned long)usbRetry);
@@ -1898,8 +1924,11 @@ static void cmdExec(const Cmd &c, Print &o) {
   } else if (cmdIs(c, "info")) {
     int used = 0;
     for (int i = 0; i < NUM_PORTS; i++) used += ports[i].active;
-    o.printf("@%s ok name=%s kind=bridge fw=%s radio_channel=%u ports_used=%d ports=%d registered=%d\n", c.id, usbProductName,
+    o.printf("@%s ok name=%s kind=bridge fw=%s radio_channel=%u ports_used=%d ports=%d registered=%d", c.id, usbProductName,
              MIMUZ_LINK_VERSION, wifiChannel, used, NUM_PORTS, regCount);
+    float t = chipTempC();
+    if (!isnan(t)) o.printf(" temp_c=%.1f", t);
+    o.print("\n");
   } else if (cmdIs(c, "get")) {
     if (c.argc == 1) {
       o.printf("@%s ok", c.id);

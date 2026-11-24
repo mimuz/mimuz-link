@@ -18,6 +18,7 @@
  - 2026/11/23 : Show that a device is still starting
  - 2026/11/23 : Bridges on USB-MIDI are found and connected by themselves (Web MIDI, config commands as SysEx)
  - 2026/11/23 : Bridges come from the mimuz-link driver; the clients list follows the ports the bridge reports; model
+ - 2026/11/24 : Bridge chip temperature in the device list and the overview (which can refresh every 10 s)
 
 */
 // Bridges and their clients are set up over USB-MIDI: the mimuz-link driver (drivers/mimuz-link.mjs) finds the
@@ -188,6 +189,7 @@ function renderList() {
       el('div', { class: 'dev-sub muted' },
         waiting ? '' : d.open ? [i.fw ? `fw ${i.fw}` : '', i.radio_channel ? ` · ch ${i.radio_channel}` : '',
           i.kind === 'bridge' ? ` · ${i.ports_used}/${i.ports} ports` : '',
+          typeof i.temp_c === 'number' ? ` · ${i.temp_c.toFixed(1)} °C` : '',
           i.kind === 'client' ? ` · ${i.transport}${i.port ? ` port ${i.port}` : ''}` : ''].join('') : 'not connected'),
       el('div', { class: 'dev-actions' },
         d.open
@@ -250,15 +252,25 @@ function overview(d, body) {
   };
   show();
   const btn = el('button', {}, 'Refresh');
-  btn.onclick = () => busy(btn, st, async () => {
+  const refresh = async () => {
     const r = await d.command('info');
     if (!r.ok) throw new Error(r.error);
     d.info = r.fields;
     show();
     renderList();
-    return 'updated';
-  });
-  body.append(el('div', { class: 'row' }, btn, st), box);
+    return `updated (${fmtTime(new Date())})`;
+  };
+  btn.onclick = () => busy(btn, st, refresh);
+  // Values that change by themselves (the bridge's chip temperature, ports in use) can be followed
+  const auto = el('input', { type: 'checkbox', checked: pref.get('overviewAuto', false) });
+  const setAuto = () => {
+    pref.set('overviewAuto', auto.checked);
+    stopAuto();
+    if (auto.checked) state.timer = setInterval(() => { if (!d.busy && !d.starting) busy(btn, st, refresh); }, 10000);
+  };
+  auto.onchange = setAuto;
+  body.append(el('div', { class: 'row' }, btn, el('label', {}, auto, ' refresh every 10 s'), st), box);
+  setAuto();
   if (d.kind === 'client') {
     body.append(el('p', { class: 'muted' },
       'This client is attached over USB. A client that is only on the radio can be reached from its bridge (Clients tab).'));
