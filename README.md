@@ -9,6 +9,10 @@ Clients (XIAO ESP32-C6, used as controllers or sound modules) connect over ESP-N
 - Delivery: Note Off messages are resent if they are not delivered. Note On messages that have waited too long are dropped.
 - Configuration: one-line commands over USB serial. Settings are stored in non-volatile memory.
 
+Documentation: [Overview](docs/overview.md) · Tutorial: [1. Quick start](docs/tutorial-quick-start.md),
+[2. A new client device](docs/tutorial-new-client.md) · [API reference](docs/README.md). The same pages are shown on
+the web site of this repository (`npm start`, then http://localhost:8080).
+
 > **Note: esp32 Arduino core 3.3.8 only.** mimuz-link uses parts of the esp32 core and ESP-IDF that are not public API, so it works only with the version it was verified on, **esp32 core 3.3.8**. Other cores (older ones, and 3.3.9 and later including 4.x) are not supported, and the build stops with an error on them. Install the verified core from the official package index with `arduino-cli core install esp32:esp32@3.3.8` (in the Arduino IDE: Boards Manager → esp32 by Espressif Systems → version 3.3.8), and do not upgrade it while you use mimuz-link. See [Build and upload](#build-and-upload-arduino-cli-esp32-core-338).
 
 ## Layout
@@ -35,9 +39,10 @@ examples/
   pc/                          PC-side measurement and config tools (Python)
   pc/web/                      viewer for checking the feel by ear and eye (Web MIDI)
   node/                        the web driver on Node.js (monitor.mjs: bridges, clients, MIDI, ping)
-docs/                          API reference (Markdown; also shown in the web console)
-web-console/                   maintenance page (browser)
-  www/drivers/                 web driver for applications: mimuz-link.mjs (+ node-midi-access.mjs for Node.js)
+docs/                          overview, tutorials and API reference (Markdown; also shown on the web site)
+web/                           web site (browser): overview, tutorial, API reference, console, firmware uploader
+  www/drivers/                 web driver for applications: mimuz-link.mjs (+ node-midi-access.mjs for Node.js), device-template.mjs,
+                                 basic-device.mjs (driver of examples/client/basic)
 ```
 
 ### What the link layer handles
@@ -134,16 +139,17 @@ Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port>
 - C6 (`c6_test_device`): `p` / `P` = measure the radio round trip 10,000 / 100,000 times, `s` = statistics, `c` = clear statistics, `r0`–`r3` = PHY rate, `b` = reboot fixed to BLE, `e` = reboot in automatic mode, `u` = erase registration and register again.
 - Bridge (`s3_bridge`): `s` = statistics, `c` = clear statistics, `l` = list registrations and ports, `x` = erase all registrations, `v` = toggle logging of every message, `h` = radio channel survey results, `H` = survey again and choose, `1`–`9` and `A`–`D` = move to radio channel 1–13, `z` = stop receiving for 150 ms.
 
-## Web console (`web-console/`)
+## Web site (`web/`)
 
-A maintenance page in the browser (Web MIDI and Web Serial, Chrome or Edge) for the bridges and clients: device list, clients of each bridge, settings, radio channel, diagnostics and a command console. Bridges on USB-MIDI are reached through the web driver below; a device attached over USB serial can be loaded as well. `npm start` at the top of the repository, then open http://localhost:8080. See `web-console/README.md`.
+Pages in the browser: **Overview**, **Tutorial** and **API reference** (the Markdown files of `docs/`), **Console** and
+**Firmware uploader**. The console is a maintenance page (Web MIDI and Web Serial, Chrome or Edge) for the bridges and clients: device list, clients of each bridge, settings, radio channel, diagnostics and a command console. Bridges on USB-MIDI are reached through the web driver below; a device attached over USB serial can be loaded as well. `npm start` at the top of the repository, then open http://localhost:8080. See `web/README.md`.
 
-## Web driver (`web-console/www/drivers/mimuz-link.mjs`)
+## Web driver (`web/www/drivers/mimuz-link.mjs`)
 
 The low-level driver for web pages and Node.js (Web MIDI with SysEx; one ES module, no dependencies). It finds the
 bridges, learns which client is on which bridge port, and lets the page pick a client by its device name, label or
 model and exchange MIDI with it, whichever port it is on and however often it reconnects. Drivers for particular
-devices are written on top of it, one per model.
+devices, one per model, extend its base class `MimuzDevice`; applications then import only those drivers.
 
 ```js
 import MimuzLink from './drivers/mimuz-link.mjs';
@@ -169,12 +175,12 @@ npm run release -- 0.2.0                        # see below; nothing is pushed
 git push origin main && git push origin v0.2.0  # the tag last
 ```
 
-`npm run release -- <version>` (web-console/firmware/release.sh), on a clean working tree:
+`npm run release -- <version>` (web/firmware/release.sh), on a clean working tree:
 
 1. writes the version into package.json, the firmware (`MIMUZ_LINK_VERSION`), library.properties and
-   web-console/package.json (`npm version <version> --no-git-tag-version`), and commits "Version <version>";
+   web/package.json (`npm version <version> --no-git-tag-version`), and commits "Version <version>";
 2. builds the bridge and client firmware from that commit (`npm run build`, arduino-cli) and commits it
-   (web-console/www/firmware, "Firmware <version>");
+   (web/www/firmware, "Firmware <version>");
 3. tags that commit `v<version>`, so the tag holds the firmware built for it.
 
 `npm run build` alone builds for testing; it stops if the sources do not carry the version in `package.json`, and

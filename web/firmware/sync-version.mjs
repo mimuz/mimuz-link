@@ -14,8 +14,8 @@
 // runs this script (the "version" script), and then commits and tags. This script writes the same version into:
 //   - libs/mimuz-link/src/mimuz_link_proto.h   MIMUZ_LINK_VERSION (what the firmware reports in "info")
 //   - libs/mimuz-link/library.properties       version (Arduino library)
-//   - web-console/package.json                 version (and its package-lock.json)
-// usage: node web-console/firmware/sync-version.mjs [--check]   (--check: only report differences, exit 1 if any)
+//   - web/package.json                 version (and its package-lock.json)
+// usage: node web/firmware/sync-version.mjs [--check]   (--check: only report differences, exit 1 if any)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,7 @@ const check = process.argv.includes('--check');
 const targets = [
   { file: 'libs/mimuz-link/src/mimuz_link_proto.h', re: /^(#define MIMUZ_LINK_VERSION ")([^"]*)(")/m },
   { file: 'libs/mimuz-link/library.properties', re: /^(version=)(.*)()$/m },
-  { file: 'web-console/package.json', re: /^(  "version": ")([^"]*)(")/m },
+  { file: 'web/package.json', re: /^(  "version": ")([^"]*)(")/m },
 ];
 
 let differ = 0;
@@ -45,19 +45,19 @@ for (const t of targets) {
     console.log(`${t.file}: ${m[2]} -> ${version}`);
   }
 }
-// web-console/package-lock.json follows web-console/package.json
-const lockPath = path.join(root, 'web-console/package-lock.json');
+// web/package-lock.json follows web/package.json
+const lockPath = path.join(root, 'web/package-lock.json');
 if (fs.existsSync(lockPath)) {
   const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
   if (lock.version !== version || lock.packages?.['']?.version !== version) {
     differ++;
     if (check) {
-      console.error(`web-console/package-lock.json: ${lock.version} (package.json: ${version})`);
+      console.error(`web/package-lock.json: ${lock.version} (package.json: ${version})`);
     } else {
       lock.version = version;
       if (lock.packages?.['']) lock.packages[''].version = version;
       fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
-      console.log(`web-console/package-lock.json -> ${version}`);
+      console.log(`web/package-lock.json -> ${version}`);
     }
   }
 }

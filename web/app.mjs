@@ -1,6 +1,6 @@
 /*
 
- app.mjs mimuz-link web console: static file server
+ app.mjs mimuz-link web site: static file server
 
  ©2026 by D.F.Mac.@TripArts Music
  Programmed by Claude Code
@@ -11,9 +11,10 @@
  - 2026/11/22 : Serve ESP Web Tools from node_modules for the firmware uploader
  - 2026/11/22 : ESP Web Tools comes from unpkg again (the page is hosted with git pull and npm start only)
  - 2026/11/24 : Serve the API reference (../docs, Markdown) at /docs
+ - 2026/11/24 : The folder is now web/ (was web-console/); ../docs also holds the overview and the tutorials
 
 */
-// Serves ./www (the page and the firmware it writes, both kept in git) and ../docs (the API reference), so the site is hosted with "git pull" and
+// Serves ./www (the page and the firmware it writes, both kept in git) and ../docs (overview, tutorials and API reference), so the site is hosted with "git pull" and
 // "npm start". The firmware uploader loads ESP Web Tools from unpkg. The page talks to the devices itself through
 // Web Serial, so the server only hosts files.
 // Web Serial needs a secure context; http://localhost counts as one, so the server listens on the loopback address.
@@ -34,7 +35,7 @@ const setHeaders = (res, file) => {
   if (file.endsWith('manifest.json')) res.setHeader('Cache-Control', 'no-cache');  // a rebuilt firmware shows at once
 };
 app.use(express.static(path.join(dir, 'www'), { setHeaders }));
-// The API reference: the Markdown files in the repository's docs/ (also read on GitHub), shown by www/js/docs.mjs
+// The documents: the Markdown files in the repository's docs/ (also read on GitHub), shown by www/js/docs.mjs
 app.use('/docs', express.static(path.join(dir, '..', 'docs'), {
   setHeaders: (res, file) => {
     if (file.endsWith('.md')) res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
@@ -43,6 +44,6 @@ app.use('/docs', express.static(path.join(dir, '..', 'docs'), {
 }));
 
 app.listen(port, host, () => {
-  console.log(`mimuz-link web console: http://${host === '127.0.0.1' ? 'localhost' : host}:${port}/`);
+  console.log(`mimuz-link web site: http://${host === '127.0.0.1' ? 'localhost' : host}:${port}/`);
   console.log('Open it in a browser with Web Serial (Chrome or Edge).');
 });

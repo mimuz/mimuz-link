@@ -4,11 +4,13 @@ The low-level driver for applications in the browser (Web MIDI) and in Node.js. 
 ports, learns which client is on which bridge port, and lets the application pick a client by its device name, label
 or model and exchange MIDI with it, whichever port it is on and however often it reconnects.
 
-Drivers for particular devices (what their buttons, knobs or sounds are; one per model) are written on top of it. The
-driver itself knows nothing about them.
+Drivers for particular devices (what their buttons, knobs or sounds are; one per model) extend its base class
+[`MimuzDevice`](#device-drivers-mimuzdevice). An application that uses device drivers imports only them: the link
+under them is made and shared by the drivers themselves. `MimuzLink` is used directly by tools that deal with all
+bridges and clients (such as the web console). The driver itself knows nothing about particular devices.
 
-- Files: `web-console/www/drivers/mimuz-link.mjs` (ES module, no dependencies) and, for Node.js only,
-  `web-console/www/drivers/node-midi-access.mjs`.
+- Files: `web/www/drivers/mimuz-link.mjs` (ES module, no dependencies) and, for Node.js only,
+  `web/www/drivers/node-midi-access.mjs`.
 - Needs: Web MIDI **with SysEx** in the browser (Chrome or Edge; the page must be in a secure context such as
   `https://` or `http://localhost`), or Node.js 20 or later with [@julusian/midi](https://www.npmjs.com/package/@julusian/midi).
 - Talks to the bridges with the SysEx messages described in [Config commands and SysEx](config-commands.md#sysex-over-usb-midi).
@@ -25,7 +27,7 @@ driver itself knows nothing about them.
 - [Sending MIDI](#sending-midi)
 - [Module exports](#module-exports)
 - [Node.js](#nodejs)
-- [Writing a device driver](#writing-a-device-driver)
+- [Device drivers (MimuzDevice)](#device-drivers-mimuzdevice)
 
 ## Quick start
 
@@ -236,12 +238,13 @@ messages it also receives from the other clients on the same bridge.
 ## Module exports
 
 ```js
-import MimuzLink, { Client, ClientRef, Bridge, parseFields, NAME_PREFIX, UID_LEN, NUM_PORTS } from './drivers/mimuz-link.mjs';
+import MimuzLink, { MimuzDevice, Client, ClientRef, Bridge, parseFields, NAME_PREFIX, UID_LEN, NUM_PORTS } from './drivers/mimuz-link.mjs';
 ```
 
 | Export | Description |
 |---|---|
 | `default` | `MimuzLink` |
+| `MimuzDevice` | The base class of device drivers, see [Device drivers](#device-drivers-mimuzdevice). |
 | `Client`, `ClientRef`, `Bridge` | The classes above (for `instanceof`; they are created by the link). |
 | `parseFields(text)` | `'a=1 b=x'` → `{ a: 1, b: 'x' }`, as used for command results. |
 | `NAME_PREFIX` | `{ bridge: 'mi:muz:bridgeESPS3-', client: 'mi:muz:conESP32C6-' }` |
@@ -272,29 +275,63 @@ link.close();
 - Tested on macOS only.
 - Example: `examples/node/monitor.mjs` (`cd examples/node && npm install && node monitor.mjs --ping N1`).
 
-## Writing a device driver
+## Device drivers (MimuzDevice)
 
-A device driver wraps a `ClientRef` for one model and turns MIDI into what the device means. A sketch:
+A device driver is a class for one model that extends `MimuzDevice` and turns MIDI into what the device means. The
+application imports only the driver. Start a new driver from the template `drivers/device-template.mjs`: copy it to
+`drivers/<model>.mjs` and follow the steps in its first comment. `drivers/basic-device.mjs`, the driver of the basic
+client example (`examples/client/basic`), is one made this way. Another one:
 
 ```js
 // drivers/knob4.mjs
-export default class Knob4 extends EventTarget {
-  constructor(link, sel = {}) {
-    super();
-    this.ref = link.client({ ...sel, model: 'knob4' });
-    this.ref.addEventListener('midi', (e) => {
-      const [st, num, val] = e.detail.data;
-      if ((st & 0xF0) === 0xB0 && num >= 20 && num < 24) {
-        this.dispatchEvent(new CustomEvent('knob', { detail: { index: num - 20, value: val } }));
-      }
-    });
+import { MimuzDevice } from './mimuz-link.mjs';
+
+export default class Knob4 extends MimuzDevice {
+  static model = 'knob4';                 // the clients it looks for
+
+  onMidi(data) {                          // every message from the device
+    const [st, num, val] = data;
+    if ((st & 0xF0) === 0xB0 && num >= 20 && num < 24) this.emit('knob', { index: num - 20, value: val });
   }
-  get connected() { return this.ref.connected; }
-  setLed(index, on) { return this.ref.noteOn(1, 36 + index, on ? 127 : 0); }
-  release() { this.ref.release(); }
+
+  setLed(index, on) { return this.noteOn(1, 36 + index, on ? 127 : 0); }
 }
 ```
 
-- Pick clients by `model` (and, when the user has several of the same model, by `label` or `name`).
-- Keep the `ClientRef`, not the `Client` or the port: it follows reconnections and port changes.
+```js
+// the application
+import Knob4 from './drivers/knob4.mjs';
+
+const knob = new Knob4();                 // or new Knob4({ label: 'left' }) when there are several
+knob.addEventListener('knob', (e) => console.log(e.detail.index, e.detail.value));
+knob.addEventListener('connect', () => knob.setLed(0, true));
+try {
+  await knob.open();                      // asks for MIDI (with SysEx)
+} catch (e) {
+  console.log(e.message);                 // why MIDI is not available
+}
+```
+
+### Members
+
+| Member | Description |
+|---|---|
+| `static model` | Set by the driver: the model of its clients (added to the selector). |
+| `new Driver(sel = {})` | `sel`: a [selector](#members) to pick one of several devices (`label`, `name`, `via`); the model comes from the class. |
+| `await open(options)` | Starts following the first connected client that matches. The first driver opened makes the link, which every driver of the page then shares (one MIDI access, one permission); `options` are those of [`new MimuzLink()`](#new-mimuzlinkoptions) for it (in Node.js `{ nodeMidi: await import('@julusian/midi') }`). `{ link }` uses a `MimuzLink` of the application's own instead. Rejects with the reason (`Error.message`) when MIDI is not available; `open()` can be called again later. Resolves the driver. |
+| `close()` | Stops following. The shared link is closed when no driver uses it any more (in Node.js the process can then end). |
+| `onMidi(data, timeStamp)` | Overridden by the driver: called with every message from the device (`data`: `Uint8Array`), before the `midi` event. |
+| `emit(type, detail)` | Sends an event of the driver (`CustomEvent` with `detail`). |
+| `await ready({ timeout })` | As on [`ClientRef`](#clientref): resolves the driver once a matching client is connected. |
+| `opened`, `client`, `link` | Whether it is open; the `Client` it follows (or `null`); the `MimuzLink` under it. |
+| `connected`, `name`, `label`, `model`, `via`, `port`, `bridge` | As on `ClientRef`. |
+| `send()`, `noteOn()` …, `command()`, `setLabel()` | As on `ClientRef` ([Sending MIDI](#sending-midi)). Before `open()`, sending returns `false` and `command()` resolves `{ ok: false, error: 'not_open' }`. |
+
+Events: `connect`, `disconnect`, `change` (as on `ClientRef`), `midi` (`{ data, timeStamp, client }`, every message,
+after `onMidi`), and the driver's own.
+
+- Pick clients by `model` (and, when the user has several of the same model, by `label` or `name`). Do not keep port
+  numbers: the driver follows reconnections and port changes.
 - Use `command()` for settings that live on the device; they are relayed over the radio and take a few ms to 1.5 s.
+- Over BLE-MIDI the model is not known, so a driver finds its device only through a bridge.
+- A full example, from the sketch to the driver: [Tutorial 2: A new client device](tutorial-new-client.md).

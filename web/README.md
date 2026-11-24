@@ -1,7 +1,17 @@
-# mimuz-link web console
+# mimuz-link web site
 
-A maintenance page for mimuz-link bridges and clients attached to the PC over USB. Several devices (for example two
-bridges and a client) can be listed and used at the same time.
+The web site of mimuz-link, served from this folder. Its pages, in the order of the menu:
+
+- **Overview**, **Tutorial** (quick start, a new client device) and **API reference**: the Markdown files of `../docs/`
+  shown as HTML (see [Documents](#documents)).
+- **Console**: a maintenance page for the bridges and clients attached to the PC over USB (below).
+- **Firmware uploader**: writes the bridge and client firmware (see [Firmware uploader](#firmware-uploader)).
+
+The site opens on the Overview. The console asks for MIDI only when its page is first opened.
+
+## Console
+
+Several devices (for example two bridges and a client) can be listed and used at the same time.
 
 - Finds the bridges on USB-MIDI by itself, connects to them and shows what each one is (`info`). Clients attached
   over USB (and, when needed, a bridge's serial port) are added with **Load device**.
@@ -11,10 +21,6 @@ bridges and a client) can be listed and used at the same time.
   radio sends, radio restarts).
 - Client attached over USB: settings and actions (restart, BLE-MIDI, unpair, reset).
 - Console: every line to and from the device, and free config commands (the `@id` is added automatically).
-- API reference: the Markdown files in `docs/` (web driver, Arduino library, config commands and SysEx), shown as
-  HTML with [markdown-it](https://github.com/markdown-it/markdown-it) (loaded from jsDelivr, a fixed version; this page
-  needs the internet). Links between the pages stay in the console; links to other files of the repository open on
-  GitHub.
 
 The page talks to the devices itself: to bridges over **USB-MIDI** through the web driver
 `www/drivers/mimuz-link.mjs` (Web MIDI with SysEx: the config commands go as SysEx, see `docs/config-commands.md` and
@@ -34,7 +40,7 @@ npm run server       # the same, kept running by pm2 (name mimuz-link-console)
 npm run build        # builds the bridge and client firmware for the firmware uploader (arduino-cli)
 ```
 
-(`cd web-console && npm start` works as well.) Everything the site needs is in git (the page and the firmware it
+(`cd web && npm start` works as well.) Everything the site needs is in git (the page and the firmware it
 writes), so a host only needs `git pull` and `npm start` (or `npm run server`). The server listens on 127.0.0.1; to publish the site, put an https reverse proxy in front of it
 (Web Serial needs https or localhost).
 
@@ -46,6 +52,15 @@ an earlier visit are forgotten when the page opens, and a device that is unplugg
 A bridge on USB-MIDI has no device log in the Console tab, and its test firmware's one-character commands (the
 statistics in Diagnostics) need its serial port: load it with **Load device (serial)** for those.
 
+## Documents
+
+The Overview, Tutorial and API reference pages show the Markdown files of `../docs/` (also read on GitHub) as HTML,
+with [markdown-it](https://github.com/markdown-it/markdown-it) (jsDelivr) and the code examples highlighted with
+[highlight.js](https://highlightjs.org/) (cdnjs); both are fixed versions loaded from the internet, so these pages need
+it. Links between the documents stay on the site, links to this README open the Console (or the Firmware uploader for
+its section), and links to other files of the repository open on GitHub. The pages and their files are listed in
+`www/js/docs.mjs` (`SETS`).
+
 ## Firmware uploader
 
 The **Firmware uploader** page writes the latest bridge and client firmware built from this repository, with
@@ -53,7 +68,7 @@ The **Firmware uploader** page writes the latest bridge and client firmware buil
 needs the internet).
 
 ```sh
-npm run build   # web-console/firmware/build.sh: builds them into www/firmware/<bridge|client|basic>/ (kept in git)
+npm run build   # web/firmware/build.sh: builds them into www/firmware/<bridge|client|basic>/ (kept in git)
 ```
 
 Only the bootloader, the partition table, `boot_app0` and the application are written, at the offsets
@@ -76,4 +91,5 @@ the merged image is not used because it covers the whole flash.
   until a reply arrives and fails after 1.5 s.
 - Settings marked ● are saved by the device; ○ last until it restarts (diagnostic).
 - Everything is written as ES modules (`app.mjs`, `www/js/*.mjs`, `www/drivers/*.mjs`). `www/drivers/` holds the
-  drivers for applications (`mimuz-link.mjs`, and device drivers on top of it); the console uses them too.
+  drivers for applications (`mimuz-link.mjs`, and device drivers on top of it, made from `device-template.mjs`, such as `basic-device.mjs` for the basic example); the
+  console uses `mimuz-link.mjs` too.

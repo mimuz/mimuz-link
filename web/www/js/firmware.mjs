@@ -1,6 +1,6 @@
 /*
 
- firmware.mjs mimuz-link web console: firmware uploader page and page switching
+ firmware.mjs mimuz-link web: firmware uploader page
 
  ©2026 by D.F.Mac.@TripArts Music
  Programmed by Claude Code
@@ -12,6 +12,7 @@
  - 2026/11/23 : Say that the bridge needs about 15 s after writing
  - 2026/11/23 : The basic client example as a third firmware
  - 2026/11/24 : A third page, the API reference (#docs...)
+ - 2026/11/24 : Page switching moved to pages.mjs
 
 */
 // Writes the bridge and client firmware built by firmware/build.sh (www/firmware/<name>/manifest.json) with
@@ -23,6 +24,7 @@
 // port ("USB JTAG/serial debug unit"), which is the one to choose for writing. The client's USB is the ESP32-C6's
 // built-in USB serial / JTAG, which ESP Web Tools can reset into download mode by itself.
 import { el, clear, status, busy } from './dom.mjs';
+import { whenShown } from './pages.mjs';
 
 const FIRMWARE = [
   {
@@ -72,7 +74,7 @@ function loadWebTools() {
 async function renderFirmware() {
   const box = clear(document.getElementById('firmware'));
   box.append(el('p', { class: 'muted' },
-    'Writes the latest firmware built from this repository (web-console/firmware/build.sh). Chrome or Edge is needed (Web Serial). Settings stored on the device are kept.'));
+    'Writes the latest firmware built from this repository (web/firmware/build.sh). Chrome or Edge is needed (Web Serial). Settings stored on the device are kept.'));
   const st = status();
   try {
     await loadWebTools();
@@ -95,7 +97,7 @@ async function card(fw) {
   const body = el('div', { class: 'fw-card' },
     el('h2', {}, fw.title, el('span', { class: 'muted small' }, ` · ${fw.board}`)));
   if (!m) {
-    body.append(el('p', { class: 'notice' }, 'No firmware built yet. Run web-console/firmware/build.sh, then reload this page.'));
+    body.append(el('p', { class: 'notice' }, 'No firmware built yet. Run web/firmware/build.sh, then reload this page.'));
     return body;
   }
   body.append(el('dl', { class: 'kv' },
@@ -128,18 +130,4 @@ async function card(fw) {
   return body;
 }
 
-// ---- pages ----
-
-let firmwareShown = false;
-function showPage() {
-  const h = location.hash;
-  const page = h === '#firmware' ? 'firmware' : h === '#docs' || h.startsWith('#docs/') ? 'docs' : 'console';
-  for (const p of document.querySelectorAll('.page')) p.hidden = p.id !== `page-${page}`;
-  for (const t of document.querySelectorAll('.page-tab')) t.classList.toggle('sel', t.dataset.page === page);
-  if (page === 'firmware' && !firmwareShown) {
-    firmwareShown = true;
-    renderFirmware();
-  }
-}
-window.addEventListener('hashchange', showPage);
-showPage();
+whenShown('firmware', renderFirmware);

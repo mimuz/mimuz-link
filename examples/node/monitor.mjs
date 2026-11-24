@@ -11,13 +11,13 @@
 
 */
 // Shows the bridges and clients as they come and go, and the MIDI each client sends, using the same driver as the
-// web pages (web-console/www/drivers/mimuz-link.mjs) on Node.js.
+// web pages (web/www/drivers/mimuz-link.mjs) on Node.js.
 //
 //   cd examples/node && npm install
 //   node monitor.mjs                 # watch until Ctrl-C
 //   node monitor.mjs --ping N1       # also measure the round trip to the client labeled N1 (test firmware echoes
 //                                    # Poly Aftertouch on channel 16)
-import MimuzLink from '../../web-console/www/drivers/mimuz-link.mjs';
+import MimuzLink from '../../web/www/drivers/mimuz-link.mjs';
 
 const args = process.argv.slice(2);
 const pingLabel = args[0] === '--ping' ? args[1] : null;

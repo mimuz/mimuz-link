@@ -9,12 +9,14 @@
 
  - 2026/11/23 : Start Writing
  - 2026/11/23 : Runs in Node.js too (node-midi-access.mjs on @julusian/midi)
+ - 2026/11/24 : MimuzDevice, the base class of device drivers (applications import only the device driver)
 
 */
 // The low-level driver of mimuz-link for web pages. It finds the bridges among the Web MIDI ports, learns which client
 // is on which bridge port, and lets the page pick a client by its device name, label or model and exchange MIDI with
 // it, whichever port it is on and however often it reconnects. Device drivers (one per kind of client: what its
-// buttons, knobs or sounds are) are written on top of this file; it knows nothing about them.
+// buttons, knobs or sounds are) extend MimuzDevice of this file; it knows nothing about them. Applications that use
+// device drivers import only those (see MimuzDevice at the end); MimuzLink itself is for tools such as the console.
 //
 //   import MimuzLink from './drivers/mimuz-link.mjs';
 //   const link = await new MimuzLink().init();         // null when Web MIDI (with SysEx) is not available: link.error
@@ -750,3 +752,122 @@ export default class MimuzLink extends Emitter {
     }, 0);
   }
 }
+
+// ======================================================================================================
+// MimuzDevice: the base class of device drivers. A driver for one model extends it, and applications import only the
+// driver: the MimuzLink under it is made when the first driver is opened, shared by every driver of the page (one MIDI
+// access, one permission), and closed when the last one is closed.
+//   class Knob1 extends MimuzDevice {
+//     static model = 'knob1';
+//     onMidi(data, timeStamp) { if (data[0] === 0xB0 && data[1] === 20) this.emit('knob', { value: data[2] }); }
+//     setLed(on) { return on ? this.noteOn(1, 60, 127) : this.noteOff(1, 60); }
+//   }
+//   const knob = new Knob1({ label: 'left' });   // selector; the model comes from the class
+//   knob.addEventListener('knob', (e) => ...);
+//   await knob.open();                           // asks for MIDI; rejects with the reason when it is not available
+//   knob.close();
+// It follows the first connected client of its model (and selector) as a ClientRef does, and has the same properties,
+// sending methods, command() and setLabel().
+//   events: 'connect', 'disconnect', 'change', 'midi' ({ data, timeStamp, client }: every message, after onMidi), and
+//           the driver's own
+// ======================================================================================================
+let shared = null;   // { link, users: Set<MimuzDevice>, opening: Promise<MimuzLink> }
+
+async function openShared(options) {
+  if (!shared) {
+    const s = { link: null, users: new Set(), opening: null };
+    shared = s;
+    s.opening = (async () => {
+      const l = new MimuzLink(options);
+      if (!(await l.init())) {
+        if (shared === s) shared = null;  // the next open() tries again
+        throw new Error(l.error);
+      }
+      s.link = l;
+      return l;
+    })();
+  }
+  const s = shared;
+  await s.opening;
+  return s;
+}
+
+export class MimuzDevice extends Emitter {
+  static model = '';   // set by the driver
+
+  constructor(sel = {}) {
+    super();
+    const model = this.constructor.model;
+    this.selector = model ? { ...sel, model } : { ...sel };
+    this.link = null;
+    this.ref = null;
+    this._shared = null;
+    this._fwd = (e) => this.emit(e.type, e.detail);
+    this._midi = (e) => {
+      this.onMidi(e.detail.data, e.detail.timeStamp);
+      this.emit('midi', e.detail);
+    };
+  }
+
+  // options: those of new MimuzLink() for the shared link (only the first open() uses them; in Node.js
+  // { nodeMidi: await import('@julusian/midi') }), or { link } to use a MimuzLink of the application's own.
+  async open(options = {}) {
+    if (this.ref) return this;
+    let link = options.link;
+    let s = null;
+    if (!link) {
+      const { link: _ignored, ...linkOptions } = options;
+      s = await openShared(linkOptions);
+      if (this.ref) return this;  // opened meanwhile
+      s.users.add(this);
+      link = s.link;
+    }
+    this._shared = s;
+    this.link = link;
+    this.ref = link.client(this.selector);
+    for (const t of ['connect', 'disconnect', 'change']) this.ref.addEventListener(t, this._fwd);
+    this.ref.addEventListener('midi', this._midi);
+    return this;
+  }
+
+  // Stops following; the shared link is closed when no driver uses it any more (in Node.js the process can then end)
+  close() {
+    if (!this.ref) return;
+    this.ref.release();
+    this.ref = null;
+    this.link = null;
+    const s = this._shared;
+    this._shared = null;
+    if (!s) return;
+    s.users.delete(this);
+    if (!s.users.size) {
+      if (shared === s) shared = null;
+      s.link.close();
+    }
+  }
+
+  // Called with every message from the device before the 'midi' event; drivers turn it into their own events
+  onMidi(data, timeStamp) {}  // data: Uint8Array; timeStamp: ms on the performance.now() clock
+
+  get opened() { return !!this.ref; }
+  get client() { return this.ref?.client ?? null; }
+  get connected() { return !!this.ref?.connected; }
+  get name() { return this.ref?.name ?? ''; }
+  get label() { return this.ref?.label ?? ''; }
+  get model() { return this.ref?.model ?? ''; }
+  get via() { return this.ref?.via ?? null; }
+  get port() { return this.ref?.port ?? 0; }
+  get bridge() { return this.ref?.bridge ?? null; }
+
+  send(data, timeStamp) { return this.ref ? this.ref.send(data, timeStamp) : false; }
+  command(text, opt) { return this.ref ? this.ref.command(text, opt) : Promise.resolve({ ok: false, error: 'not_open', items: [], text: '' }); }
+  setLabel(label) { return this.ref ? this.ref.setLabel(label) : Promise.resolve({ ok: false, error: 'not_open', items: [], text: '' }); }
+
+  // Resolves this once a matching client is connected (rejects after timeout ms; 0 = wait for ever)
+  async ready(opt) {
+    if (!this.ref) throw new Error('not_open');
+    await this.ref.ready(opt);
+    return this;
+  }
+}
+Object.assign(MimuzDevice.prototype, MidiSend);

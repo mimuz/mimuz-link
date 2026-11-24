@@ -11,10 +11,10 @@
 #
 # The tag v<version> goes on a commit that already holds the firmware built for that version:
 #   1. "npm version <version> --no-git-tag-version": package.json, and through the "version" script the firmware
-#      sources (MIMUZ_LINK_VERSION), library.properties and web-console/package.json
+#      sources (MIMUZ_LINK_VERSION), library.properties and web/package.json
 #   2. commit "Version <version>"
-#   3. build the bridge and client firmware from that commit (web-console/firmware/build.sh)
-#   4. commit "Firmware <version>" (web-console/www/firmware)
+#   3. build the bridge and client firmware from that commit (web/firmware/build.sh)
+#   4. commit "Firmware <version>" (web/www/firmware)
 #   5. tag v<version> on that commit
 # Nothing is pushed. Push the branch first and the tag last:
 #   git push origin <branch> && git push origin v<version>
@@ -43,8 +43,8 @@ npm version "$NEW" --no-git-tag-version
 git add package.json
 git commit -m "Version $NEW"
 
-MIMUZ_RELEASE=1 sh ./web-console/firmware/build.sh
-git add web-console/www/firmware
+MIMUZ_RELEASE=1 sh ./web/firmware/build.sh
+git add web/www/firmware
 git commit -m "Firmware $NEW"
 
 git tag -a "v$NEW" -m "mimuz-link $NEW"

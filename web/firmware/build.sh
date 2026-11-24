@@ -24,21 +24,21 @@
 # there are uncommitted changes or (except in a release, see release.sh, where the tag comes after the firmware
 # commit) the commit is not the one tagged v<version>. Each manifest records the source commit ("rev").
 #
-# usage: npm run build   (or web-console/firmware/build.sh; needs arduino-cli with the esp32 core, see the README)
+# usage: npm run build   (or web/firmware/build.sh; needs arduino-cli with the esp32 core, see the README)
 set -e
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-OUT="$ROOT/web-console/www/firmware"
+OUT="$ROOT/web/www/firmware"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 VERSION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version)' "$ROOT/package.json")
-node "$ROOT/web-console/firmware/sync-version.mjs" --check || {
-  echo "the version in the sources differs from package.json ($VERSION); run: node web-console/firmware/sync-version.mjs" >&2
+node "$ROOT/web/firmware/sync-version.mjs" --check || {
+  echo "the version in the sources differs from package.json ($VERSION); run: node web/firmware/sync-version.mjs" >&2
   exit 1
 }
 REV=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-if [ -n "$(git -C "$ROOT" status --porcelain -- . ':!web-console/www/firmware' 2>/dev/null)" ]; then
+if [ -n "$(git -C "$ROOT" status --porcelain -- . ':!web/www/firmware' 2>/dev/null)" ]; then
   REV="$REV-dirty"
   echo "warning: building with uncommitted changes ($REV); a release is built by: npm run release -- <version>" >&2
 elif [ -z "$MIMUZ_RELEASE" ] && [ "$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null)" != "v$VERSION" ]; then

@@ -1,6 +1,6 @@
 /*
 
- main.mjs mimuz-link web console: user interface
+ main.mjs mimuz-link web: the Console page
 
  ©2026 by D.F.Mac.@TripArts Music
  Programmed by Claude Code
@@ -19,6 +19,7 @@
  - 2026/11/23 : Bridges on USB-MIDI are found and connected by themselves (Web MIDI, config commands as SysEx)
  - 2026/11/23 : Bridges come from the mimuz-link driver; the clients list follows the ports the bridge reports; model
  - 2026/11/24 : Bridge chip temperature in the device list and the overview (which can refresh every 10 s)
+ - 2026/11/24 : MIDI is opened when the Console page is first shown (the site opens on the Overview)
 
 */
 // Bridges and their clients are set up over USB-MIDI: the mimuz-link driver (drivers/mimuz-link.mjs) finds the
@@ -31,6 +32,7 @@ import MimuzLink from '../drivers/mimuz-link.mjs';
 import { Device, MidiBridge, RelayTarget } from './device.mjs';
 import { BRIDGE_SETTINGS, CLIENT_SETTINGS, LABEL_PATTERN, PHY_RATES, kindOfUsb, toCommand, toForm } from './settings.mjs';
 import { busy, clear, el, fmtTime, status, table } from './dom.mjs';
+import { whenShown } from './pages.mjs';
 
 const LOG_MAX = 2000;
 const state = {
@@ -127,7 +129,7 @@ async function init() {
   if (!('serial' in navigator)) {
     $('unsupported').hidden = false;
     $('add').disabled = true;
-    initMidi();
+    whenShown('console', initMidi);
     return;
   }
   $('add').addEventListener('click', async () => {
@@ -153,7 +155,7 @@ async function init() {
   });
   renderList();
   renderDetail();
-  initMidi();
+  whenShown('console', initMidi);  // asks for MIDI (with SysEx) only when the console is used
 }
 
 // ---------------- device list ----------------
