@@ -31,7 +31,7 @@ export function kindOfUsb(usb) {
   return 'unknown';
 }
 
-// Taken from the README ("Config commands"). saved = written to non-volatile memory by "set"; the others are
+// Taken from docs/config-commands.md. saved = written to non-volatile memory by "set"; the others are
 // diagnostic and last until the next restart.
 
 export const PHY_RATES = [

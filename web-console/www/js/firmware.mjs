@@ -11,6 +11,7 @@
  - 2026/11/22 : Load ESP Web Tools from unpkg (fixed version)
  - 2026/11/23 : Say that the bridge needs about 15 s after writing
  - 2026/11/23 : The basic client example as a third firmware
+ - 2026/11/24 : A third page, the API reference (#docs...)
 
 */
 // Writes the bridge and client firmware built by firmware/build.sh (www/firmware/<name>/manifest.json) with
@@ -131,7 +132,8 @@ async function card(fw) {
 
 let firmwareShown = false;
 function showPage() {
-  const page = location.hash === '#firmware' ? 'firmware' : 'console';
+  const h = location.hash;
+  const page = h === '#firmware' ? 'firmware' : h === '#docs' || h.startsWith('#docs/') ? 'docs' : 'console';
   for (const p of document.querySelectorAll('.page')) p.hidden = p.id !== `page-${page}`;
   for (const t of document.querySelectorAll('.page-tab')) t.classList.toggle('sel', t.dataset.page === page);
   if (page === 'firmware' && !firmwareShown) {

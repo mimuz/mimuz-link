@@ -11,12 +11,16 @@ bridges and a client) can be listed and used at the same time.
   radio sends, radio restarts).
 - Client attached over USB: settings and actions (restart, BLE-MIDI, unpair, reset).
 - Console: every line to and from the device, and free config commands (the `@id` is added automatically).
+- API reference: the Markdown files in `docs/` (web driver, Arduino library, config commands and SysEx), shown as
+  HTML with [markdown-it](https://github.com/markdown-it/markdown-it) (loaded from jsDelivr, a fixed version; this page
+  needs the internet). Links between the pages stay in the console; links to other files of the repository open on
+  GitHub.
 
 The page talks to the devices itself: to bridges over **USB-MIDI** through the web driver
-`www/drivers/mimuz-link.mjs` (Web MIDI with SysEx: the config commands go as SysEx, see the top README, "SysEx
-inquiries" and "Web driver"; applications use the same driver), and to serial ports through **Web Serial** (Chrome or Edge). Setting up
+`www/drivers/mimuz-link.mjs` (Web MIDI with SysEx: the config commands go as SysEx, see `docs/config-commands.md` and
+`docs/js-driver.md`; applications use the same driver), and to serial ports through **Web Serial** (Chrome or Edge). Setting up
 the system goes through the bridges over USB-MIDI, including the clients on the radio; Web Serial is for a client set
-up on its own over USB, for a bridge's log, and for the firmware uploader. The server only hosts the files in `www/`.
+up on its own over USB, for a bridge's log, and for the firmware uploader. The server only hosts the files in `www/`, and the API reference in `../docs/`.
 Web MIDI with SysEx and Web Serial need a secure context, and `http://localhost` is one, so the server listens on the
 loopback address.
 
@@ -67,7 +71,7 @@ the merged image is not used because it covers the whole flash.
 
 - MIDI ports can be used by several programs at once (the PC tools that use MIDI can run while the page is open). A serial port can be open in one program only. Close it here (Disconnect) before using the PC tools
   (`examples/pc/*.py`) on the same device, and close the tools before connecting here.
-- The port is opened with DTR on, as the firmware expects (see the README, "Config commands").
+- The port is opened with DTR on, as the firmware expects (see `docs/config-commands.md`).
 - Commands are sent one at a time per device. A command relayed to a client over the radio is resent by the bridge
   until a reply arrives and fails after 1.5 s.
 - Settings marked ● are saved by the device; ○ last until it restarts (diagnostic).

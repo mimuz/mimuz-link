@@ -35,6 +35,7 @@ examples/
   pc/                          PC-side measurement and config tools (Python)
   pc/web/                      viewer for checking the feel by ear and eye (Web MIDI)
   node/                        the web driver on Node.js (monitor.mjs: bridges, clients, MIDI, ping)
+docs/                          API reference (Markdown; also shown in the web console)
 web-console/                   maintenance page (browser)
   www/drivers/                 web driver for applications: mimuz-link.mjs (+ node-midi-access.mjs for Node.js)
 ```
@@ -52,45 +53,23 @@ web-console/                   maintenance page (browser)
 | Duplicates | drops packets that arrive twice because of radio-layer retries | the same |
 | Diagnostics | radio round-trip measurement, statistics | PING replies, statistics, logging |
 
-Carried messages: channel messages and channel-less messages (clock, start, stop, song position, and so on). SysEx is not carried; the bridge answers the mimuz-link SysEx inquiries itself (see "SysEx inquiries").
+Carried messages: channel messages and channel-less messages (clock, start, stop, song position, and so on). SysEx is not carried; the bridge answers the mimuz-link SysEx inquiries itself (see [docs/config-commands.md](docs/config-commands.md#sysex-over-usb-midi)).
 
 The link layer handles each MIDI message on its own. It does not pair Note On with Note Off and does not track which notes are sounding.
 
 ### Application API
 
-Client (`#include <mimuz_link_client.h>`, namespace `mlink`):
+The full reference is in [docs/](docs/README.md): [Arduino library](docs/arduino-library.md) (client and bridge
+firmware), [web driver](docs/js-driver.md) (web pages and Node.js) and [config commands and SysEx](docs/config-commands.md).
 
 ```cpp
-mlink::Config cfg;                       // model (what kind of device), namePrefix, repair (register again), task priorities
-mlink::onMidi(handler);                  // received MIDI (called from the receive task)
-mlink::onMidiFast(handler);              // optional: called right away inside radio receive handling
-mlink::Transport tr = mlink::begin(cfg); // once in setup(); returns TR_ESPNOW or TR_BLE
-mlink::sendMidi(status, d1, d2, aux, waitMs);  // can be called from any task
-mlink::loop();                           // call from loop()
-
-// Settings
-mlink::setRxChannels(mask, flags);       // MIDI channels to listen to (bit0 = ch1; 0xFFFF = OMNI)
-mlink::setNoteOnMaxAgeMs(ms);            // age after which a waiting Note On is dropped (0 = never)
-mlink::setRate(idx);                     // PHY rate (0=1M 1=6M 2=24M 3=MCS4)
-mlink::restart(mlink::BOOT_AUTO);        // BOOT_AUTO / BOOT_BLE / BOOT_REPAIR
-
-// State and diagnostics
-mlink::name(); mlink::isConnected(); mlink::port(); mlink::radioChannel(); mlink::transport();
-mlink::radioPing(count); mlink::printStats(Serial); mlink::clearStats();
-```
-
-Bridge (`#include <mimuz_link_bridge.h>`, namespace `mlink`):
-
-```cpp
-#define MIMUZ_BRIDGE_NAME_PREFIX "mi:muz:bridgeESPS3"   // optional (define before the include)
-mlink::onUsbMidi(handler);               // optional: see MIDI from the PC first (return true to not forward it)
-mlink::setMidiLogFilter(filter);         // optional: choose which messages are logged one by one
-mlink::begin();                          // once in setup() (the radio channel survey takes about 12 s)
-mlink::loop();                           // call from loop()
-
-mlink::usbSend(port, m); mlink::setNoteOnMaxAgeMs(ms);
-mlink::clearRegistry(); mlink::resurvey(); mlink::switchChannel(ch); mlink::debugDeaf(ms);
-mlink::printStats(Serial); mlink::printList(Serial); mlink::printSurvey(); mlink::clearStats();
+#include <mimuz_link_client.h>               // client (C6), namespace mlink
+mlink::Config cfg;
+cfg.model = "knob4";                         // what kind of device this is
+mlink::onMidi(handler);                      // received MIDI (called from the receive task)
+mlink::begin(cfg);                           // once in setup(): ESP-NOW if the bridge is reachable, otherwise BLE-MIDI
+mlink::sendMidi(0x90, 60, 100);              // from any task
+mlink::loop();                               // from loop()
 ```
 
 - This is a header-only library: include it from only one file of the sketch.
@@ -133,64 +112,22 @@ None. The test client (C6) and the bridge (S3) both run on bare boards.
 2. The PC sees `mi:muz:bridgeESPS3-<unique ID> Port 1` to `Port 8`. A connected C6 gets the lowest free port. Port numbers are not fixed per device; they follow the order in which devices connect.
 3. Without a bridge, the C6 waits as a BLE-MIDI device named `mi:muz:conESP32C6-<unique ID>`.
 
-## Config commands (USB serial)
+## Config commands
 
-Both the C6 and the bridge are configured over USB serial (115200). MIDI goes over USB-MIDI and the radio; serial is used for configuration only.
-Open the port with DTR on (the C6 resets if the port is opened with DTR off; the S3 does not reply unless DTR is on).
+Bridges and clients are set up with one-line text commands, over USB serial, as SysEx over USB-MIDI (bridge), or
+relayed by the bridge over the radio to a client (`port <n> …`):
 
-- PC → device: `@<id> <command> <args…>` (one line)
-- Device → PC: `@<id> ok <key=value …>` / `@<id> err <reason>` / `@<id> + <key=value …>` (an intermediate line of a multi-line reply)
-- Lines that do not start with `@` are log output.
-- Values written with `set` are saved to non-volatile memory immediately and applied at the next boot (except the diagnostic items marked "not saved").
+```
+@1 info
+@1 ok name=mi:muz:bridgeESPS3-QEwFK6XO000 kind=bridge fw=0.1.3 radio_channel=7 ports_used=6 ports=8 registered=6 temp_c=67.4
+@2 port 1 set label left
+@2 ok label=left
+```
 
-| Device | Command | Description |
-|---|---|---|
-| both | `info` | name, kind, firmware version, connection state |
-| both | `get [key]` / `set <key> <value>` | read and write settings |
-| C6 | key `rx_channels` | MIDI channels to listen to (bit0 = channel 1; `omni` and `none` are also accepted) |
-| C6 | key `noteon_max_age_ms` | age after which a waiting Note On is dropped (0 = never; default 80) |
-| C6 | key `label` | your name for this client (up to 30 of `A-Z a-z 0-9 - _ .`; `-` clears it). Saved on the client and told to the bridge on every connect and change, and whenever the bridge asks; shown by `info` and in the bridge's `ports` list. Not used as the USB or BLE device name: applications can pick a client by its label (free; several clients may share one on purpose) or by its device name (unique) |
-| C6 | key `model` | what kind of device this client is (e.g. `knob4`), fixed by its sketch (`Config::model`, up to 16 of `A-Z a-z 0-9 - _ .`; empty = not given). Read only. Told to the bridge with the label and device name, so that applications (and their device drivers) can find the clients of a kind. Also shown by `info` |
-| C6 | key `phy_rate` | radio rate (0=1M 1=6M 2=24M 3=MCS4; default 1) |
-| C6 | `reset` / `unpair` / `restart [auto\|ble]` | reset settings to defaults / erase registration and reboot / reboot |
-| both | `radio_restart [wifi\|stall]` | diagnostic: restart ESP-NOW. `wifi` = restart Wi-Fi as well, `stall` = simulate a stuck driver (the device should detect it and restart by itself). The bridge also takes `driver` = reinitialize the Wi-Fi driver, and `stall hold` = a stuck driver that survives restarts (recovery escalates up to a device restart) |
-| bridge | keys `channel_min`, `channel_max` | range of radio channels that may be chosen (takes effect at the next survey) |
-| bridge | key `noteon_max_age_ms` | same as above, for the PC → client direction |
-| bridge | `ports` / `registry` / `survey` | connected ports (also shows per-port signal strength `rssi`, undelivered count `tx_fail`, and the client's `label`, device `name` and `model`, which an ESP-NOW client tells only to its bridge) / registered clients (with the last `label`, `name` and `model` each told, kept with the registration) / latest radio channel survey |
-| bridge | `unregister <MAC\|all>` | remove a registration |
-| bridge | `label_request [<port>\|all]` | ask clients for their label again (the bridge also asks by itself when a client's label has not arrived 2 s after it connected, up to 5 times) |
-| bridge | `resurvey` / `switch_channel <n>` | survey the radio channels again and choose one (about 12 s) / move to the given radio channel |
-| bridge | `port <n> <command…>` | relay a command over the radio to the client on port n (e.g. `@5 port 2 set rx_channels omni`). Resent every 150 ms until a reply arrives; `err timeout` after 1.5 s |
-| bridge | key `tx_parallel` | 1 = hand packets to the radio in parallel, one per client (default; a hard-to-reach client holds up the others less); 0 = one packet at a time overall, for comparison. Not saved |
-| both | key `send_lock` | 1 = hand packets to the radio under the Wi-Fi driver's global lock (default). ESP-NOW otherwise adds frames to the driver's transmit queue without that lock, which can lose the queue and stall all sending until the driver is initialized again. 0 = without the lock, for comparison. Not saved |
-| bridge | keys `tx_fail_max`, `tx_probe` | diagnostic: number of consecutive failures before an unresponsive client is skipped (default 3); probe sends while skipped (1 = on; starts at 250 ms, doubling up to 1 s). Not saved |
-| bridge | key `trace_status` / `trace [clear]` | diagnostic: status byte of the messages to trace (e.g. 175 = Poly Aftertouch ch16), 0 = off (default). A traced message that the client sends back unchanged is timed from its arrival over USB until the reply has been written to USB (`total_us`), and until the reply arrived over the radio (`radio_us`). `trace` lists the 16 slowest with their port, data bytes (`key` = data1 + data2 × 128) and USB arrival time (`in_us`, bridge clock), slowest first, plus p50 / p99 / max. The tables (about 10 KB) are allocated only while tracing is on. Subtract `total_us` from the round trip measured on the PC to get the time spent on the PC and USB side. Not saved |
-| both | key `retry_limit` | how many times the radio retries a frame that is not acknowledged (bridge default 8, client default 0; 0 = the Wi-Fi library's value, 32). The radio sends the frames handed to it in order, so while it retries a frame to a far client, the frames to the other clients wait behind it; 8 shortens those waits (near clients' longest delays about 2.6 ms shorter with a client at about -87 dBm) at the cost of more lost packets to such a far client (about 0.6% instead of 0.08%; Note Offs are resent). `get retry_limit` also shows the values in use and the library's. Uses functions of the Wi-Fi library that are not in its public headers. Not saved |
-| bridge | key `slow_tx_ms` / `slowtx [clear]` | diagnostic: radio sends whose result (delivered or not) came this many ms or more after they were handed to the radio are recorded (default 10, 0 = off). `slowtx` lists the last 64, oldest first: port, `sent_us` (bridge clock, same as `in_us` of `trace`), `air_us`, `ok`, `resend` (Note Off resend packet), `timeout` (no result at all), `len`, `rssi`, `nomem` (running count of sends the radio refused). Not saved |
-| bridge | key `tx_impl` | diagnostic: 0 = single-queue send task, 1 = per-client send task (default). For comparing both inside one firmware. Not saved |
+Every command and setting, and the SysEx messages of the bridge (`F0 7D 4D 4C …`, including the port changes it
+tells by itself): [docs/config-commands.md](docs/config-commands.md).
 
 Tool for trying commands from the PC: `examples/pc/mlink_config.py <serial port> "command" …`
-
-## SysEx inquiries (USB-MIDI, bridge)
-
-A PC application can ask the bridge, over USB-MIDI, which client is on a port and which bridge it is talking to, and can send it any config command (including those relayed to its clients), so the bridge and its clients can be set up without the serial port. This is how the web console talks to bridges. The bridge answers on the port the inquiry was sent to. These messages are not sent over the radio; other SysEx messages are ignored.
-
-```
-inquiry : F0 7D 4D 4C <cmd> F7
-reply   : F0 7D 4D 4C <cmd + 0x40> <format version> <data ...> F7
-```
-
-`7D` is the manufacturer ID for non-commercial use; `4D 4C` ("ML") marks mimuz-link. Strings are a length byte followed by ASCII characters (no terminator). The format version is 2 (version 1, firmware 0.1.2: no model in the port reply, and port changes are not told).
-
-| cmd | inquiry | reply data |
-|---|---|---|
-| `01` port | `F0 7D 4D 4C 01 F7` on port n | `41 02 <port 1-8> <state> <client device name> <client label> <client model>`. state: 0 = no client (all strings empty), 1 = connected, name and label not told yet, 2 = connected, name and label known. **Also sent by the bridge itself**, on the port concerned, whenever a client connects to it, leaves it or tells its label — once the PC has sent any of these inquiries since the bridge started, so that MIDI programs that never ask get no SysEx. If nothing reads the port, these messages are dropped rather than holding up MIDI |
-| `02` bridge | `F0 7D 4D 4C 02 F7` on any port | `42 01 <bridge device name> <firmware version> <radio channel> <ports in use> <ports>` |
-| `03` config command | `F0 7D 4D 4C 03 <command line> F7` on any port | one message per reply line: `43 <more> <text>` (no line end, no format version). The command line and the replies are the same text as on the serial (see "Config commands"), e.g. `@7 port 2 get label` → `@7 ok label=N1`; the leading `@` may be left out. more = 1: the line was longer than 240 characters and continues in the next message |
-
-Example: `F0 7D 4D 4C 41 02 01 02 1D "mi:muz:conESP32C6-j3f5__w9GK0" 02 "N1" 04 "test" F7` = port 1, client `mi:muz:conESP32C6-j3f5__w9GK0` with label `N1` and model `test`.
-
-Web pages do not need to handle these messages themselves: see "Web driver" below.
 
 ## Serial commands (test firmware)
 
@@ -203,47 +140,25 @@ A maintenance page in the browser (Web MIDI and Web Serial, Chrome or Edge) for 
 
 ## Web driver (`web-console/www/drivers/mimuz-link.mjs`)
 
-The low-level driver for web pages (Web MIDI with SysEx; one ES module, no dependencies). It finds the bridges, learns which client is on which bridge port, and lets the page pick a client by its device name, label or model and exchange MIDI with it, whichever port it is on and however often it reconnects. Drivers for particular devices (what their buttons, knobs or sounds are) are written on top of it, one per model.
+The low-level driver for web pages and Node.js (Web MIDI with SysEx; one ES module, no dependencies). It finds the
+bridges, learns which client is on which bridge port, and lets the page pick a client by its device name, label or
+model and exchange MIDI with it, whichever port it is on and however often it reconnects. Drivers for particular
+devices are written on top of it, one per model.
 
 ```js
 import MimuzLink from './drivers/mimuz-link.mjs';
 
-const link = await new MimuzLink().init();         // null if Web MIDI with SysEx is not available (reason: link.error)
-const knob = link.client({ model: 'knob4' });       // follows the first connected client of that model ({ name }, { label } too)
-knob.addEventListener('connect', () => knob.noteOn(1, 60, 100));   // channels are 1-16
-knob.addEventListener('midi', (e) => console.log(e.detail.data, e.detail.timeStamp));
-knob.addEventListener('disconnect', () => {});
-const r = await knob.command('get rx_channels');    // config command, relayed by the bridge: { ok, fields, items, error }
-link.addEventListener('change', () => show(link.bridges, link.clients));  // bridges or clients came, went or changed
+const link = new MimuzLink();
+if (!(await link.init())) throw new Error(link.error);
+const knob = link.client({ model: 'knob4' });       // follows the first connected client of that model
+knob.addEventListener('connect', () => knob.noteOn(1, 60, 100));
+knob.addEventListener('midi', (e) => console.log(e.detail.data));
 ```
 
-| | |
-|---|---|
-| `link.bridges` | `Bridge`: `name`, `info` (`fw`, `channel`, `portsUsed`, `format`), `ports[1..8]` (`state`, `name`, `label`, `model`), `command(text)` (a config command run on the bridge), events `change`, `ready` |
-| `link.clients` | connected `Client`s: `name` (device name, unique), `label`, `model`, `via` (`espnow` / `ble`), `bridge`, `port`; `send(data)`, `noteOn` / `noteOff` / `controlChange` / `programChange` / `pitchBend` / `polyAftertouch` / `channelAftertouch`, `command(text)`, `setLabel(label)`; events `connect`, `disconnect`, `change`, `midi`. One object per device name: it stays the same while the client reconnects or moves to another port |
-| `link.find(sel)` / `link.findAll(sel)` | connected clients matching `{ name, label, model, via }` (all keys given must match) |
-| `link.client(sel)` | a `ClientRef`, the handle a device driver keeps: the same members as `Client`, following the first connected client that matches (it switches to another one when that one leaves); `ready({ timeout })` waits for one |
-| events of `link` | `change` (bridges or clients came, went or changed), `midi` (`{ client, data, timeStamp }` from any client) |
+In Node.js (20 or later) it runs on [@julusian/midi](https://www.npmjs.com/package/@julusian/midi):
+`new MimuzLink({ nodeMidi: await import('@julusian/midi') })`. Example: `examples/node/monitor.mjs`.
 
-- Bridges are found by their port names; which MIDI port is which bridge port is learned from the bridge's port replies, so it does not depend on how the operating system names the ports.
-- Bridges of format version 2 tell port changes by themselves. Older bridges (format 1) are asked every `pollMs` (option, default 1000 ms), and their clients have no model.
-- Clients on BLE-MIDI (no bridge) are found by their device name. Over BLE only the name is known: no label, no model, no config commands.
-- SysEx is not carried over the radio, so `send` refuses it.
-
-**Node.js** (20 or later): the same driver runs on [@julusian/midi](https://www.npmjs.com/package/@julusian/midi) (RtMidi) through `node-midi-access.mjs`, which gives it the part of Web MIDI it uses. Pass the module so that it is found in the application's `node_modules`, and close the link at the end (open MIDI ports keep the process running):
-
-```js
-import MimuzLink from './drivers/mimuz-link.mjs';
-const link = await new MimuzLink({ nodeMidi: await import('@julusian/midi') }).init();
-// ... same as in the browser ...
-link.close();
-```
-
-- Ports coming and going are found by comparing the port names every 500 ms (RtMidi does not report them). A bridge that restarts within that time may be missed.
-- The ports are listed by two RtMidi objects kept for the whole run (no new MIDI client per scan), and each open port is closed and destroyed when it goes away.
-- Only the ports of bridges and clients are opened; other MIDI devices are left alone.
-- `send(data, timeStamp)` waits for a future time stamp with a timer (RtMidi has no scheduling). Received messages are stamped with `performance.now()`.
-- Example: `examples/node/monitor.mjs` (`cd examples/node && npm install && node monitor.mjs --ping N1`).
+Reference: [docs/js-driver.md](docs/js-driver.md).
 
 ## Versions and releases
 

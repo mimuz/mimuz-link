@@ -17,6 +17,7 @@
  - 2026/11/22 : Two pages: Console and Firmware uploader; "Load device" moves into the Console page
  - 2026/11/22 : Footer with the credits
  - 2026/11/23 : Bridges on USB-MIDI appear by themselves; "Load device" is for serial ports
+ - 2026/11/24 : API reference page (docs/*.md shown with markdown-it)
 
 -->
 <html lang="en">
@@ -32,6 +33,7 @@
     <nav class="pages">
       <a href="#console" class="page-tab" data-page="console">Console</a>
       <a href="#firmware" class="page-tab" data-page="firmware">Firmware uploader</a>
+      <a href="#docs" class="page-tab" data-page="docs">API reference</a>
     </nav>
   </header>
   <p id="unsupported" class="notice" hidden>
@@ -62,14 +64,20 @@
     <div id="firmware"></div>
   </section>
 
+  <section id="page-docs" class="page" hidden>
+    <div id="docs"></div>
+  </section>
+
   <footer class="credit">
     ©2026 D.F.Mac.@TripArts Music ·
     <a href="https://github.com/mimuz/mimuz-link" target="_blank" rel="noopener">mimuz-link</a> ·
     Firmware uploader powered by <a href="https://esphome.github.io/esp-web-tools/" target="_blank" rel="noopener">ESP Web Tools</a>
-    (<a href="https://github.com/esphome/esp-web-tools" target="_blank" rel="noopener">GitHub</a>) by ESPHome
+    (<a href="https://github.com/esphome/esp-web-tools" target="_blank" rel="noopener">GitHub</a>) by ESPHome ·
+    API reference rendered with <a href="https://github.com/markdown-it/markdown-it" target="_blank" rel="noopener">markdown-it</a>
   </footer>
 
   <script type="module" src="js/main.mjs"></script>
   <script type="module" src="js/firmware.mjs"></script>
+  <script type="module" src="js/docs.mjs"></script>
 </body>
 </html>

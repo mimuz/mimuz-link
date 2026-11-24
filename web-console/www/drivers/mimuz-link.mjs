@@ -23,7 +23,7 @@
 //   knob.addEventListener('connect', () => knob.noteOn(1, 60, 100));
 //   link.addEventListener('change', () => render(link.bridges, link.clients));
 //
-// What it uses (see the README of mimuz-link, "SysEx inquiries"):
+// What it uses (see docs/config-commands.md of mimuz-link, "SysEx over USB-MIDI"; the API: docs/js-driver.md):
 //   - Bridges are the MIDI ports whose names contain "mi:muz:bridgeESPS3-<unique ID>" (8 ports each). Which MIDI port is
 //     which bridge port is learned from the bridge's port replies (cmd 01), not from the port names, which differ
 //     between operating systems.
@@ -159,7 +159,7 @@ export class Client extends Emitter {
     }
   }
 
-  // A config command run on the client (see the README, "Config commands"), relayed by its bridge.
+  // A config command run on the client (see docs/config-commands.md), relayed by its bridge.
   // Resolves { ok, fields, items, error, text }.
   async command(text, opt = {}) {
     if (this.via !== 'espnow') return { ok: false, error: this.via === 'ble' ? 'not_available_over_ble' : 'not_connected', items: [], text: '' };
@@ -329,7 +329,7 @@ export class Bridge extends Emitter {
     if (o) trySend(o, [...SX_HEAD, SX_PORT, 0xF7]);
   }
 
-  // A config command run on the bridge (see the README, "Config commands"); "port <n> ..." is relayed to a client.
+  // A config command run on the bridge (see docs/config-commands.md); "port <n> ..." is relayed to a client.
   // Resolves { ok, fields, items, error, text }; rejects on timeout.
   command(text, { timeout = DEFAULT_TIMEOUT_MS } = {}) {
     return new Promise((resolve, reject) => {

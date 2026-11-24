@@ -15,7 +15,7 @@
  - 2026/11/23 : MidiBridge goes through the mimuz-link driver (drivers/mimuz-link.mjs)
 
 */
-// Config command protocol of mimuz-link over USB serial (see the README, "Config commands"):
+// Config command protocol of mimuz-link over USB serial (see docs/config-commands.md):
 //   PC -> device : "@<id> <command> <args...>" (one line)
 //   device -> PC : "@<id> ok <key=value ...>" / "@<id> err <reason>" / "@<id> + <key=value ...>" (a line of a
 //                  multi-line reply, before the ok). Lines that do not start with "@" are log output.
