@@ -61,6 +61,10 @@ it. Links between the documents stay on the site, links to this README open the 
 its section), and links to other files of the repository open on GitHub. The pages and their files are listed in
 `www/js/docs.mjs` (`SETS`).
 
+The Overview and the Tutorial are also in Japanese (`../docs/ja/`, the same file names). The **English** / **日本語**
+buttons at the right of the menu, shown on those two pages, switch the language; English is the default, and the choice
+is kept in the browser (local storage). The other pages are in English only.
+
 ## Firmware uploader
 
 The **Firmware uploader** page writes the latest bridge and client firmware built from this repository, with

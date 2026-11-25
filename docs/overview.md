@@ -20,7 +20,7 @@ PC ~~ BLE-MIDI ~~ client (when no bridge is found)
 
 | Page | What is there |
 |---|---|
-| [Tutorial 1: Quick start](tutorial-quick-start.md) | Write the firmware from the browser, pair a client with a bridge, and play MIDI. |
+| [Tutorial 1: Quick start](tutorial-quick-start.md) | Write the firmware from the browser, pair a client with a bridge, and send and receive MIDI messages. |
 | [Tutorial 2: A new client device](tutorial-new-client.md) | Make a device of your own, step by step: the sketch, building, pairing, and a driver for web pages. |
 | [API reference](README.md) | The [web driver](js-driver.md), the [Arduino library](arduino-library.md), and the [config commands and SysEx](config-commands.md). |
 | [Console](../web/README.md) | Set up the bridges and their clients in the browser: clients, labels, radio channel, diagnostics. |

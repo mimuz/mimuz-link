@@ -12,6 +12,7 @@
  - 2026/11/23 : Badge for the transport (MIDI / serial)
  - 2026/11/24 : API reference page
  - 2026/11/24 : Overview and Tutorial pages
+ - 2026/11/25 : English / Japanese buttons
 
 */
 :root {
@@ -164,6 +165,11 @@ button.link { border: 0; background: none; color: var(--accent); padding: 0 4px;
 .page-tab { padding: 6px 12px; border-radius: 6px 6px 0 0; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
 .page-tab:hover { color: var(--text); }
 .page-tab.sel { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.lang { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.lang[hidden] { display: none; }
+.lang button { margin: 0; border: 0; border-radius: 0; padding: 4px 10px; background: none; color: var(--muted); font-size: 12px; }
+.lang button + button { border-left: 1px solid var(--line); }
+.lang button.sel { background: var(--sel); color: var(--accent); font-weight: 600; }
 .toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .layout { min-height: calc(100vh - 100px); }
 #page-firmware { padding: 14px 18px; }
@@ -202,3 +208,6 @@ esp-web-install-button button { margin: 0; }
 .doc th { font-size: 12.5px; }
 .doc td, .doc th { vertical-align: top; }
 .doc blockquote { margin: 10px 0; padding: 4px 12px; border-left: 3px solid var(--line); color: var(--muted); }
+@media (max-width: 760px) {
+  .top { flex-wrap: wrap; }
+}

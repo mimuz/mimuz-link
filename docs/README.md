@@ -1,7 +1,8 @@
 # mimuz-link API reference
 
 New to mimuz-link? Start with the [overview](overview.md) and the tutorials: [Quick start](tutorial-quick-start.md)
-and [A new client device](tutorial-new-client.md).
+and [A new client device](tutorial-new-client.md). In Japanese: [概要](ja/overview.md), [クイックスタート](ja/tutorial-quick-start.md),
+[新規デバイスの作成](ja/tutorial-new-client.md).
 
 | Document | For |
 |---|---|

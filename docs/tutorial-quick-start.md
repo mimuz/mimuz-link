@@ -1,10 +1,11 @@
 # Tutorial 1: Quick start
 
-From two bare boards to MIDI on the PC, without writing code: write the firmware from the browser, pair the client
-with the bridge, and play a note.
+From two bare boards to MIDI messages on the PC, without writing code: write the firmware from the browser, pair the
+client with the bridge, and check the MIDI messages between the client and the PC.
 
-What you get at the end: a client (XIAO ESP32-C6) whose BOOT button plays a note on the PC through the bridge
-(XIAO ESP32-S3), and whose LED lights when the PC sends that note back.
+What you get at the end: a client (XIAO ESP32-C6) that sends a Note On message to the PC through the bridge
+(XIAO ESP32-S3) when its BOOT button is pressed, and lights its LED when the PC sends that note back. The client sends
+and receives MIDI messages only; it makes no sound itself.
 
 ## Contents
 
@@ -13,7 +14,7 @@ What you get at the end: a client (XIAO ESP32-C6) whose BOOT button plays a note
 - [Step 2: Write the bridge firmware](#step-2-write-the-bridge-firmware)
 - [Step 3: Write the client firmware](#step-3-write-the-client-firmware)
 - [Step 4: Pair the client with the bridge](#step-4-pair-the-client-with-the-bridge)
-- [Step 5: Play MIDI](#step-5-play-midi)
+- [Step 5: Send and receive MIDI](#step-5-send-and-receive-midi)
 - [Step 6: Give the client a label](#step-6-give-the-client-a-label)
 - [Step 7: Without the bridge (BLE-MIDI)](#step-7-without-the-bridge-ble-midi)
 - [Next](#next)
@@ -25,8 +26,9 @@ What you get at the end: a client (XIAO ESP32-C6) whose BOOT button plays a note
 - Two USB-C cables that carry data (not charge-only cables).
 - A PC with **Chrome or Edge** (the site uses Web Serial and Web MIDI), [git](https://git-scm.com/) and
   [Node.js](https://nodejs.org/) 18 or later.
-- MIDI software to see and send notes: a DAW, a MIDI monitor, or the Node.js monitor of this repository
-  (`examples/node/monitor.mjs`, Node.js 20 or later).
+- MIDI software to see and send MIDI messages: a MIDI monitor, a DAW, or the Node.js monitor of this repository
+  (`examples/node/monitor.mjs`, Node.js 20 or later). To hear the button, a DAW (or another program) with a software
+  instrument (see step 5).
 
 ## Step 1: Start the web site
 
@@ -84,7 +86,10 @@ connect (applications find clients by name, label or model instead, see [Tutoria
 To pair the client with another bridge, erase its registration (**Unpair** in the client's window of the Clients tab,
 or the config command `unpair`), then pair it again next to the other bridge.
 
-## Step 5: Play MIDI
+## Step 5: Send and receive MIDI
+
+The basic example only sends and receives MIDI messages; it makes no sound itself. To hear the button, route the input
+Port 1 to a software instrument in a DAW.
 
 1. In your MIDI software, open the input **`mi:muz:bridgeESPS3-<unique ID>` Port 1** (on some systems the port names
    differ slightly; the port number is what counts).

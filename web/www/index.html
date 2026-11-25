@@ -19,6 +19,7 @@
  - 2026/11/23 : Bridges on USB-MIDI appear by themselves; "Load device" is for serial ports
  - 2026/11/24 : API reference page (docs/*.md shown with markdown-it)
  - 2026/11/24 : Overview and Tutorial pages; pages in the order Overview, Tutorial, API reference, Console, Firmware uploader
+ - 2026/11/25 : English / Japanese buttons for the Overview and the Tutorial
 
 -->
 <html lang="en">
@@ -38,6 +39,10 @@
       <a href="#console" class="page-tab" data-page="console">Console</a>
       <a href="#firmware" class="page-tab" data-page="firmware">Firmware uploader</a>
     </nav>
+    <div id="lang" class="lang" role="group" aria-label="Language" hidden>
+      <button type="button" data-lang="en">English</button>
+      <button type="button" data-lang="ja" lang="ja">日本語</button>
+    </div>
   </header>
   <p id="unsupported" class="notice" hidden>
     This browser has no Web Serial (needed for clients attached over USB and for the firmware uploader). Use Chrome or

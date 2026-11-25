@@ -12,6 +12,8 @@ Clients (XIAO ESP32-C6, used as controllers or sound modules) connect over ESP-N
 Documentation: [Overview](docs/overview.md) · Tutorial: [1. Quick start](docs/tutorial-quick-start.md),
 [2. A new client device](docs/tutorial-new-client.md) · [API reference](docs/README.md). The same pages are shown on
 the web site of this repository (`npm start`, then http://localhost:8080).
+日本語: [概要](docs/ja/overview.md) · チュートリアル: [1. クイックスタート](docs/ja/tutorial-quick-start.md),
+[2. 新規デバイスの作成](docs/ja/tutorial-new-client.md).
 
 > **Note: esp32 Arduino core 3.3.8 only.** mimuz-link uses parts of the esp32 core and ESP-IDF that are not public API, so it works only with the version it was verified on, **esp32 core 3.3.8**. Other cores (older ones, and 3.3.9 and later including 4.x) are not supported, and the build stops with an error on them. Install the verified core from the official package index with `arduino-cli core install esp32:esp32@3.3.8` (in the Arduino IDE: Boards Manager → esp32 by Espressif Systems → version 3.3.8), and do not upgrade it while you use mimuz-link. See [Build and upload](#build-and-upload-arduino-cli-esp32-core-338).
 
@@ -40,6 +42,7 @@ examples/
   pc/web/                      viewer for checking the feel by ear and eye (Web MIDI)
   node/                        the web driver on Node.js (monitor.mjs: bridges, clients, MIDI, ping)
 docs/                          overview, tutorials and API reference (Markdown; also shown on the web site)
+docs/ja/                       the overview and the tutorials in Japanese
 web/                           web site (browser): overview, tutorial, API reference, console, firmware uploader
   www/drivers/                 web driver for applications: mimuz-link.mjs (+ node-midi-access.mjs for Node.js), device-template.mjs,
                                  basic-device.mjs (driver of examples/client/basic)
