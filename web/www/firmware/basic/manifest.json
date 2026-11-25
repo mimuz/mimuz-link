@@ -1,8 +1,8 @@
 {
   "name": "mimuz-link client: basic example (XIAO ESP32-C6)",
-  "version": "0.1.4",
-  "rev": "3d4c304",
-  "built": "2026-11-24T16:19:13+0900",
+  "version": "0.1.5",
+  "rev": "e36bf92",
+  "built": "2026-11-25T10:59:24+0900",
   "app_size": 1352448,
   "new_install_prompt_erase": false,
   "new_install_improv_wait_time": 0,
